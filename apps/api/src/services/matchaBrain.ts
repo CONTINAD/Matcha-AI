@@ -246,13 +246,14 @@ Make a sophisticated trading decision considering ALL factors. Explain your reas
     const endTimer = decisionLatency.startTimer({ mode: 'single' });
     try {
       const response = await this.openai.chat.completions.create({
-        model: 'gpt-4-turbo-preview',
+        model: 'gpt-5.1', // Upgraded from gpt-4-turbo-preview
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userPrompt },
         ],
         response_format: { type: 'json_object' },
         temperature: 0.3, // Lower temperature for more consistent decisions
+        reasoning_effort: 'medium', // Adaptive reasoning: fast for simple, deep for complex
       });
 
       const content = response.choices[0]?.message?.content;
@@ -361,13 +362,14 @@ Suggest improvements to the configuration. Remember: NEVER increase risk limits.
 
     try {
       const response = await this.openai.chat.completions.create({
-        model: 'gpt-4-turbo-preview',
+        model: 'gpt-5.1', // Upgraded from gpt-4-turbo-preview
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userPrompt },
         ],
         response_format: { type: 'json_object' },
         temperature: 0.5,
+        reasoning_effort: 'medium',
       });
 
       const content = response.choices[0]?.message?.content;

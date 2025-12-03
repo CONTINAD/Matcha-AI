@@ -235,13 +235,14 @@ Return as JSON array of recommendation strings.`;
 
     try {
       const response = await openai.chat.completions.create({
-        model: 'gpt-4-turbo-preview',
+        model: 'gpt-5.1', // Upgraded from gpt-4-turbo-preview
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userPrompt },
         ],
         response_format: { type: 'json_object' },
         temperature: 0.7,
+        reasoning_effort: 'medium',
       });
 
       const content = response.choices[0]?.message?.content;
@@ -341,13 +342,14 @@ Return as JSON with array of insights, each with: insight, confidence (0-1), act
 
     try {
       const response = await openai.chat.completions.create({
-        model: 'gpt-4-turbo-preview',
+        model: 'gpt-5.1', // Upgraded from gpt-4-turbo-preview
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userPrompt },
         ],
         response_format: { type: 'json_object' },
         temperature: 0.7,
+        reasoning_effort: 'medium',
       });
 
       const content = response.choices[0]?.message?.content;

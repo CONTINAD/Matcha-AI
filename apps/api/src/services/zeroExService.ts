@@ -60,7 +60,15 @@ export class ZeroXService {
         amount: params.amount 
       }, 'Calling 0x API for quote - this will use API credits');
 
-      const response = await axios.get<ZeroXQuote>(`${chainConfig.zeroXApiUrl}/swap/v1/quote`, {
+      // Use v2 API - check if large trade (>5 ETH) for RFQ
+      const sellAmountNum = parseFloat(params.amount);
+      const isLargeTrade = sellAmountNum > 5e18; // >5 ETH
+      
+      const endpoint = isLargeTrade
+        ? `${chainConfig.zeroXApiUrl}/swap/v2/rfq/quote`
+        : `${chainConfig.zeroXApiUrl}/swap/v2/quote`;
+
+      const response = await axios.get<ZeroXQuote>(endpoint, {
         params: {
           sellToken: params.sellToken,
           buyToken: params.buyToken,
@@ -69,6 +77,7 @@ export class ZeroXService {
         },
         headers: {
           '0x-api-key': this.apiKey,
+          '0x-version': 'v2', // Explicitly request v2
         },
         timeout: 15000, // 15 second timeout
       });

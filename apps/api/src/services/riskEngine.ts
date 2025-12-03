@@ -31,6 +31,40 @@ export class RiskEngine {
   }
 
   /**
+   * Monte Carlo CVaR - simulates 10k scenarios based on historical distribution
+   * More robust than historical CVaR for tail risk estimation
+   */
+  calculateMonteCarloCVaR(returns: number[], confidence = 0.95, numSimulations = 10000): number {
+    if (returns.length === 0) return 0;
+
+    // Calculate historical mean and std dev
+    const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
+    const variance = returns.reduce((sum, r) => sum + Math.pow(r - mean, 2), 0) / returns.length;
+    const stdDev = Math.sqrt(variance);
+
+    if (stdDev === 0) return 0;
+
+    // Generate Monte Carlo simulations (normal distribution)
+    const simulatedReturns: number[] = [];
+    for (let i = 0; i < numSimulations; i++) {
+      // Box-Muller transform for normal distribution
+      const u1 = Math.random();
+      const u2 = Math.random();
+      const z0 = Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+      const simulatedReturn = mean + stdDev * z0;
+      simulatedReturns.push(simulatedReturn);
+    }
+
+    // Calculate CVaR from simulations
+    const sorted = simulatedReturns.sort((a, b) => a - b);
+    const cutoffIndex = Math.max(0, Math.floor((1 - confidence) * sorted.length));
+    const tail = sorted.slice(0, cutoffIndex + 1);
+    if (tail.length === 0) return 0;
+    const avgLoss = tail.reduce((sum, r) => sum + r, 0) / tail.length;
+    return Math.abs(Math.min(0, avgLoss));
+  }
+
+  /**
    * Kelly Criterion position sizing (returns percent of equity, capped)
    */
   calculateKellyPositionPct(winRate: number, payoffRatio: number, capPct: number): number {
@@ -63,7 +97,8 @@ export class RiskEngine {
 
     const confidence = riskLimits.varConfidence ?? 0.95;
     const varPct = this.calculateHistoricalVaR(returns, confidence) * 100;
-    const cvarPct = this.calculateCVaR(returns, confidence) * 100;
+    // Use Monte Carlo CVaR for more robust tail risk estimation
+    const cvarPct = this.calculateMonteCarloCVaR(returns, confidence, 10000) * 100;
 
     if (riskLimits.maxPortfolioVaRPct && varPct > riskLimits.maxPortfolioVaRPct) {
       return {

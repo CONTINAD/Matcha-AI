@@ -197,7 +197,7 @@ Return ONLY a valid JSON object matching this structure:
 
     try {
       const response = await this.openai.chat.completions.create({
-        model: 'gpt-4',
+        model: 'gpt-5.1', // Upgraded from gpt-4
         messages: [
           {
             role: 'system',
@@ -210,6 +210,7 @@ Return ONLY a valid JSON object matching this structure:
         ],
         temperature: 0.7,
         max_tokens: 2000,
+        reasoning_effort: 'medium', // Adaptive reasoning for strategy optimization
       });
 
       const content = response.choices[0]?.message?.content;

@@ -94,8 +94,8 @@ export class RiskManager {
       return false;
     }
 
-    // Tail-risk guard (VaR / CVaR)
-    if (riskLimits.maxPortfolioVaRPct) {
+    // Tail-risk guard (VaR / CVaR with Monte Carlo)
+    if (riskLimits.maxPortfolioVaRPct && params.recentReturns && params.recentReturns.length > 0) {
       const tailRisk = riskEngine.violatesTailRiskLimits(params.recentReturns, riskLimits);
       if (tailRisk.violated) {
         logger.warn(

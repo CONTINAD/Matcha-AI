@@ -20,6 +20,12 @@ export const SUPPORTED_CHAINS: ChainConfig[] = [
     zeroXApiUrl: 'https://arbitrum.api.0x.org',
   },
   {
+    chainId: 10143, // Monad (per 0x changelog)
+    name: 'Monad',
+    rpcUrl: process.env.MONAD_RPC_URL || 'https://rpc.monad.xyz',
+    zeroXApiUrl: 'https://monad.api.0x.org', // Will be available when Monad launches
+  },
+  {
     chainId: 101, // Solana Mainnet (using 101 as standard Solana chain ID)
     name: 'Solana Mainnet',
     rpcUrl: process.env.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com',

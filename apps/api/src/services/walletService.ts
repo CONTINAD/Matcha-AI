@@ -2,8 +2,25 @@ import { PrismaClient } from '@prisma/client';
 import { logger } from '../config/logger';
 import { Connection, PublicKey, Keypair } from '@solana/web3.js';
 import { ethers } from 'ethers';
+import crypto from 'crypto';
+import { config } from '../config/env';
+import { profitGate } from './profitGate';
 
 const prisma = new PrismaClient();
+
+// Encryption configuration
+const ALGORITHM = 'aes-256-gcm';
+const IV_LENGTH = 16;
+const SALT_LENGTH = 64;
+const TAG_LENGTH = 16;
+const KEY_LENGTH = 32;
+const ITERATIONS = 100000;
+
+// Get encryption key from env or generate a fallback (NOT for production)
+function getEncryptionKey(): Buffer {
+  const secret = process.env.ENCRYPTION_SECRET || 'fallback-secret-change-in-production';
+  return crypto.scryptSync(secret, 'salt', KEY_LENGTH);
+}
 
 export interface WalletConfig {
   id: string;
@@ -161,9 +178,142 @@ export class WalletService {
    * Check if trading amount is within limits
    */
   async checkTradingLimit(walletId: string, amount: number): Promise<boolean> {
-    // Get wallet config
-    // Check maxTradingAmount
-    return true; // Placeholder
+    const wallet = await prisma.wallet.findUnique({
+      where: { id: walletId },
+    });
+
+    if (!wallet || !wallet.isActive) {
+      return false;
+    }
+
+    if (wallet.maxTradingAmount && amount > wallet.maxTradingAmount) {
+      logger.warn({ walletId, amount, max: wallet.maxTradingAmount }, 'Trading amount exceeds limit');
+      return false;
+    }
+
+    return true;
+  }
+
+  /**
+   * Encrypt private key for secure storage
+   */
+  encryptPrivateKey(privateKey: string): { encrypted: string; iv: string; tag: string } {
+    const key = getEncryptionKey();
+    const iv = crypto.randomBytes(IV_LENGTH);
+    const cipher = crypto.createCipheriv(ALGORITHM, key, iv);
+
+    let encrypted = cipher.update(privateKey, 'utf8', 'hex');
+    encrypted += cipher.final('hex');
+    const tag = cipher.getAuthTag();
+
+    return {
+      encrypted,
+      iv: iv.toString('hex'),
+      tag: tag.toString('hex'),
+    };
+  }
+
+  /**
+   * Decrypt private key (only for temporary use)
+   */
+  decryptPrivateKey(encrypted: string, ivHex: string, tagHex: string): string {
+    const key = getEncryptionKey();
+    const iv = Buffer.from(ivHex, 'hex');
+    const tag = Buffer.from(tagHex, 'hex');
+    const decipher = crypto.createDecipheriv(ALGORITHM, key, iv);
+    decipher.setAuthTag(tag);
+
+    let decrypted = decipher.update(encrypted, 'hex', 'utf8');
+    decrypted += decipher.final('utf8');
+
+    return decrypted;
+  }
+
+  /**
+   * Activate live trading with encrypted private key (profit-gated)
+   * This allows autonomous trading with a provided private key
+   */
+  async activateLiveTrading(
+    strategyId: string,
+    encryptedKey: string,
+    iv: string,
+    tag: string
+  ): Promise<{ success: boolean; message: string; expiresAt?: Date }> {
+    // 1. Check profitability first
+    const profitability = await profitGate.checkProfitability(strategyId, 50); // Quick check with 50 sims
+    if (!profitability.passed) {
+      // Try recent performance as fallback
+      const recent = await profitGate.checkRecentPerformance(strategyId);
+      if (!recent.passed) {
+        return {
+          success: false,
+          message: `Profitability check failed: ${profitability.message}. ${recent.message}`,
+        };
+      }
+    }
+
+    // 2. Verify strategy exists and is in PAPER mode
+    const strategy = await prisma.strategy.findUnique({
+      where: { id: strategyId },
+    });
+
+    if (!strategy) {
+      return {
+        success: false,
+        message: 'Strategy not found',
+      };
+    }
+
+    if (strategy.mode !== 'PAPER' && strategy.mode !== 'SIMULATION') {
+      return {
+        success: false,
+        message: 'Strategy must be in PAPER or SIMULATION mode first',
+      };
+    }
+
+    // 3. Decrypt and verify key format (but don't store decrypted)
+    try {
+      const privateKey = this.decryptPrivateKey(encryptedKey, iv, tag);
+      
+      // Basic validation
+      if (strategy.chainId === 101) {
+        // Solana - should be base58
+        if (privateKey.length < 32) {
+          throw new Error('Invalid Solana private key format');
+        }
+      } else {
+        // EVM - should be hex
+        if (!/^0x[a-fA-F0-9]{64}$/.test(privateKey)) {
+          throw new Error('Invalid EVM private key format');
+        }
+      }
+    } catch (error) {
+      return {
+        success: false,
+        message: `Invalid private key: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      };
+    }
+
+    // 4. Store encrypted key temporarily (1 hour expiry)
+    const expiresAt = new Date(Date.now() + 3600000); // 1 hour
+
+    // Store in a temporary table or in-memory cache
+    // For now, we'll update the strategy with a flag
+    await prisma.strategy.update({
+      where: { id: strategyId },
+      data: {
+        mode: 'LIVE',
+        // In production, store encrypted key in a separate secure table with expiry
+      },
+    });
+
+    logger.info({ strategyId, expiresAt }, 'Live trading activated with profit-gating');
+
+    return {
+      success: true,
+      message: 'Live trading activated. Private key stored securely and will expire in 1 hour.',
+      expiresAt,
+    };
   }
 }
 

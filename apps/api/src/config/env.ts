@@ -33,24 +33,13 @@ export const config = {
     url: requireEnv('DATABASE_URL'),
   },
   dataProviders: {
-    coinGecko: {
-      apiKey: optionalEnv('COINGECKO_API_KEY'),
-      baseUrl: optionalEnv('COINGECKO_API_URL', 'https://pro-api.coingecko.com/api/v3'),
-    },
-    binance: {
-      restUrl: optionalEnv('BINANCE_REST_URL', 'https://api.binance.com'),
-      wsUrl: optionalEnv('BINANCE_WS_URL', 'wss://stream.binance.com:9443/stream'),
-      defaultQuote: optionalEnv('BINANCE_DEFAULT_QUOTE', 'USDT'),
-    },
-    theGraph: {
-      uniswapV3Url: optionalEnv(
-        'UNISWAP_V3_SUBGRAPH',
-        'https://api.thegraph.com/subgraphs/name/uniswap/uniswap-v3'
-      ),
+    zeroX: {
+      apiKey: requireEnv('ZEROX_API_KEY'),
+      baseUrl: optionalEnv('ZEROX_BASE_URL', 'https://api.0x.org'),
     },
     cache: {
       redisUrl: optionalEnv('REDIS_URL'),
-      defaultTtlSeconds: parseInt(optionalEnv('CACHE_TTL_SECONDS', '30') || '30', 10),
+      defaultTtlSeconds: parseInt(optionalEnv('CACHE_TTL_SECONDS', '3') || '3', 10), // 3s for live prices
     },
   },
   server: {
