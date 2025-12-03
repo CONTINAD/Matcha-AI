@@ -1,0 +1,40 @@
+{
+  "name": "matcha-ai",
+  "version": "1.0.0",
+  "private": true,
+  "description": "AI-driven crypto trading system",
+  "scripts": {
+    "dev": "pnpm --parallel --filter './apps/*' dev",
+    "dev:all": "pnpm --parallel --filter './apps/*' dev",
+    "dev:api": "pnpm --filter @matcha-ai/api dev",
+    "dev:web": "pnpm --filter @matcha-ai/web dev",
+    "build": "pnpm --recursive build",
+    "build:api": "pnpm --filter @matcha-ai/api build",
+    "build:web": "pnpm --filter @matcha-ai/web build",
+    "test": "pnpm --recursive test",
+    "test:all": "pnpm --recursive test",
+    "test:api": "pnpm --filter @matcha-ai/api test",
+    "test:web": "pnpm --filter @matcha-ai/web test",
+    "test:smoke": "pnpm --filter @matcha-ai/api test smoke.test.ts",
+    "lint": "pnpm --recursive lint",
+    "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md}\"",
+    "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,json,md}\"",
+    "db:migrate": "pnpm --filter @matcha-ai/api db:migrate",
+    "db:generate": "pnpm --filter @matcha-ai/api db:generate",
+    "db:studio": "pnpm --filter @matcha-ai/api db:studio",
+    "db:seed": "pnpm --filter @matcha-ai/api db:seed"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@typescript-eslint/eslint-plugin": "^6.15.0",
+    "@typescript-eslint/parser": "^6.15.0",
+    "eslint": "^8.56.0",
+    "prettier": "^3.1.1",
+    "typescript": "^5.3.3"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "pnpm": ">=8.0.0"
+  }
+}
+

@@ -1,0 +1,238 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// Seed script configuration
+// Run with: pnpm db:seed
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(cuid())
+  email     String?  @unique
+  createdAt DateTime @default(now())
+
+  strategies Strategy[]
+  wallets    Wallet[]
+  limitOrders LimitOrder[]
+}
+
+model Strategy {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  name        String
+  description String?
+  mode        String   // SIMULATION, PAPER, LIVE
+  baseAsset   String   // e.g. "USDC"
+  universeJson String  @default("[]") // JSON array of token symbols
+  timeframe   String   // "1m", "5m", "1h", "1d"
+  status      String   @default("PAUSED") // ACTIVE, PAUSED
+  configJson  String   @default("{}") // JSON object with strategy config
+  chainId     Int      @default(1) // Ethereum mainnet by default
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  trades              Trade[]
+  performanceSnapshots PerformanceSnapshot[]
+  configSuggestions    ConfigSuggestion[]
+  predictions          Prediction[]
+  limitOrders         LimitOrder[]
+  copyTargets          CopyTarget[]
+  modelInsights        ModelInsight[]
+
+  @@index([userId])
+  @@index([status])
+}
+
+model Trade {
+  id          String   @id @default(cuid())
+  strategyId  String
+  strategy    Strategy @relation(fields: [strategyId], references: [id], onDelete: Cascade)
+
+  timestamp   DateTime
+  mode        String   // BACKTEST, PAPER, LIVE
+  symbol      String   // token symbol or pair
+  side        String   // BUY, SELL
+  size        Float
+  entryPrice  Float
+  exitPrice   Float?
+  fees        Float    @default(0)
+  slippage    Float    @default(0)
+  pnl         Float    @default(0)
+  pnlPct      Float    @default(0)
+  txHash      String?
+
+  @@index([strategyId])
+  @@index([timestamp])
+  @@index([mode])
+}
+
+model PerformanceSnapshot {
+  id          String   @id @default(cuid())
+  strategyId  String
+  strategy    Strategy @relation(fields: [strategyId], references: [id], onDelete: Cascade)
+
+  timestamp   DateTime
+  equityCurvePoint Float
+  maxDrawdown Float
+  sharpe      Float?
+  winRate     Float
+  totalTrades Int      @default(0)
+  notes       String?
+
+  @@index([strategyId])
+  @@index([timestamp])
+}
+
+model CopyTarget {
+  id            String   @id @default(cuid())
+  strategyId    String
+  strategy      Strategy @relation(fields: [strategyId], references: [id], onDelete: Cascade)
+  
+  walletAddress String
+  chainId       Int
+  chainType     String   // 'EVM' or 'SOLANA'
+  copyPercentage Float   @default(50) // 0-100
+  minConfidence Float    @default(0.7) // 0-1
+  status        String   @default("ACTIVE") // ACTIVE, PAUSED
+  
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  
+  copyTrades   CopyTrade[]
+  
+  @@index([strategyId])
+  @@index([status])
+}
+
+model CopyTrade {
+  id            String     @id @default(cuid())
+  targetId      String
+  target        CopyTarget @relation(fields: [targetId], references: [id], onDelete: Cascade)
+  
+  originalTxHash String
+  copiedTxHash   String?
+  symbol         String
+  side           String     // BUY, SELL
+  size           Float
+  price          Float
+  timestamp      DateTime   @default(now())
+  status         String     @default("PENDING") // PENDING, EXECUTED, FAILED
+  
+  @@index([targetId])
+  @@index([status])
+}
+
+model ModelInsight {
+  id          String   @id @default(cuid())
+  strategyId  String
+  strategy    Strategy @relation(fields: [strategyId], references: [id], onDelete: Cascade)
+  
+  insight     String
+  confidence  Float    // 0-1
+  action      String
+  reasoning   String
+  
+  createdAt   DateTime @default(now())
+  
+  @@index([strategyId])
+  @@index([createdAt])
+}
+
+model LimitOrder {
+  id          String   @id @default(cuid())
+  strategyId String
+  strategy   Strategy @relation(fields: [strategyId], references: [id], onDelete: Cascade)
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  symbol      String
+  side        String   // BUY, SELL
+  size        Float
+  limitPrice  Float
+  chainId     Int
+  status      String   @default("PENDING") // PENDING, FILLED, CANCELLED, EXPIRED
+  fillPrice   Float?
+  filledAt    DateTime?
+  expiryTime  DateTime?
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([strategyId])
+  @@index([status])
+  @@index([userId])
+}
+
+model ConfigSuggestion {
+  id                String   @id @default(cuid())
+  strategyId        String
+  strategy          Strategy @relation(fields: [strategyId], references: [id], onDelete: Cascade)
+
+  createdAt         DateTime @default(now())
+  oldConfigJson     String
+  suggestedConfigJson String
+  status            String   @default("PENDING") // PENDING, ACCEPTED, REJECTED
+  reasoning         String?  // AI-generated reasoning
+
+  @@index([strategyId])
+  @@index([status])
+}
+
+model Wallet {
+  id                String   @id @default(cuid())
+  userId            String
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  chainType         String   // 'EVM' or 'SOLANA'
+  chainId           Int?     // For EVM chains
+  address           String
+  encryptedPrivateKey String? // DEPRECATED: Non-custodial design - do not use. Kept for migration only.
+  maxTradingAmount  Float?   // Maximum amount to trade (safety limit)
+  label             String?  // Optional label for the wallet
+  isActive          Boolean  @default(true)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@unique([userId, address, chainType])
+  @@index([userId])
+}
+
+model Prediction {
+  id                String   @id @default(cuid())
+  strategyId        String
+  strategy          Strategy @relation(fields: [strategyId], references: [id], onDelete: Cascade)
+  
+  timestamp         DateTime @default(now())
+  symbol            String
+  predictedAction   String   // 'long', 'short', 'flat'
+  predictedPrice    Float?   // Predicted price movement
+  confidence        Float    // 0-1
+  marketContext     String   @default("{}") // JSON of market context at prediction time
+  indicators        String   @default("{}") // JSON of indicators used
+  reasoning         String?  // AI reasoning for the prediction
+  
+  // Outcome (filled after trade completes)
+  actualAction      String?  // What actually happened
+  actualPrice       Float?   // Actual price at outcome
+  outcome           String?  // 'correct', 'incorrect', 'neutral'
+  pnl               Float?   // P&L if trade was taken
+  tradeId           String?  // Link to actual trade if executed
+  
+  evaluatedAt       DateTime?
+  learningNotes     String?  // What the AI learned from this prediction
+
+  @@index([strategyId])
+  @@index([timestamp])
+  @@index([outcome])
+  @@index([evaluatedAt])
+}
+
