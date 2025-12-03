@@ -49,3 +49,6 @@ coverage/
 
 # Prisma
 prisma/migrations/*.sql.bak
+
+# GitHub config (contains user info)
+.github-config
