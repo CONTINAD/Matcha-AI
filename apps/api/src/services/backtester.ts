@@ -9,7 +9,7 @@ import type {
 } from '@matcha-ai/shared';
 import { matchaBrain } from './matchaBrain';
 import { riskManager } from './riskManager';
-import { extractIndicators } from './features';
+import { extractIndicatorsSync } from './features';
 import { reinforcementLearning } from './reinforcementLearning';
 import { predictionTrainer } from './predictionTrainer';
 import { calculatePnL, calculateSharpe, calculateMaxDrawdown } from '@matcha-ai/shared';
@@ -99,8 +99,8 @@ export class Backtester {
         lastDailyReset = currentCandle.timestamp;
       }
 
-      // Extract indicators
-      const indicators = extractIndicators(recentCandles, strategyConfig.indicators) as any;
+      // Extract indicators (using sync version for performance in backtests)
+      const indicators = extractIndicatorsSync(recentCandles, strategyConfig.indicators) as any;
 
       // Build market context
       const openPositions = Array.from(positions.values());

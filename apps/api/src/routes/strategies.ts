@@ -18,6 +18,7 @@ import { multiTimeframeAnalyzer } from '../services/multiTimeframeAnalyzer';
 import { copyTradingService } from '../services/copyTradingService';
 import { portfolioRebalancer } from '../services/portfolioRebalancer';
 import { advancedTrainer } from '../services/advancedTrainer';
+import { walletService } from '../services/walletService';
 import type { StrategyConfig } from '@matcha-ai/shared';
 import { logger } from '../config/logger';
 
@@ -373,6 +374,48 @@ export async function strategyRoutes(fastify: FastifyInstance) {
     } catch (error) {
       logger.error({ error }, 'Error stopping paper trading');
       return reply.code(500).send({ error: 'Failed to stop paper trading' });
+    }
+  });
+
+  // Activate live trading with profit-gating (requires encrypted private key)
+  fastify.post('/strategies/:id/live/activate', async (request, reply) => {
+    try {
+      const { id } = request.params as { id: string };
+      const body = request.body as {
+        encryptedKey: string;
+        iv: string;
+        tag: string;
+      };
+
+      if (!body.encryptedKey || !body.iv || !body.tag) {
+        return reply.code(400).send({
+          error: 'Missing required fields',
+          message: 'encryptedKey, iv, and tag are required',
+        });
+      }
+
+      const result = await walletService.activateLiveTrading(
+        id,
+        body.encryptedKey,
+        body.iv,
+        body.tag
+      );
+
+      if (!result.success) {
+        return reply.code(403).send({
+          error: 'Activation failed',
+          message: result.message,
+        });
+      }
+
+      return reply.send({
+        success: true,
+        message: result.message,
+        expiresAt: result.expiresAt,
+      });
+    } catch (error: any) {
+      logger.error({ error: error.message }, 'Error activating live trading');
+      return reply.code(500).send({ error: 'Failed to activate live trading', message: error.message });
     }
   });
 

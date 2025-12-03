@@ -5,6 +5,7 @@ import { decisionLatency } from './metrics';
 import { PrismaClient } from '@prisma/client';
 import { multiTimeframeAnalyzer } from './multiTimeframeAnalyzer';
 import { advancedTrainer } from './advancedTrainer';
+import { strategyEngine } from './strategyEngine';
 import type {
   MarketContext,
   Decision,
@@ -122,6 +123,43 @@ You must respond with a valid JSON object matching this structure:
       logger.warn({ error }, 'Failed to get multi-timeframe analysis');
     }
     
+    // Check for arbitrage and mean reversion opportunities FIRST (before AI)
+    // These are high-probability edges that should be prioritized
+    let strategyDecision: Decision | null = null;
+    try {
+      const symbol = strategyConfig.universe[0];
+      if (symbol && strategyId) {
+        const strategy = await prisma.strategy.findUnique({
+          where: { id: strategyId },
+          select: { chainId: true, baseAsset: true },
+        });
+        const chainId = strategy?.chainId || 1;
+        const baseAsset = strategy?.baseAsset || 'USDC';
+        
+        // 1. Check for arbitrage opportunities (>2% edge)
+        const arb = await strategyEngine.detectArb(chainId, baseAsset, [symbol], 2.0);
+        if (arb) {
+          strategyDecision = strategyEngine.arbToDecision(arb);
+          logger.info({ strategyId, symbol, edge: arb.edge }, 'Arbitrage opportunity detected - prioritizing over AI');
+        } else {
+          // 2. Check for mean reversion signals
+          const meanRev = await strategyEngine.meanReversionSignal(chainId, baseAsset, symbol, 30);
+          if (meanRev.action !== 'hold') {
+            strategyDecision = strategyEngine.meanReversionToDecision(meanRev);
+            logger.info({ strategyId, symbol, action: meanRev.action, deviation: meanRev.deviation }, 'Mean reversion signal detected');
+          }
+        }
+      }
+    } catch (error) {
+      logger.warn({ error }, 'Error checking strategy engine opportunities');
+    }
+
+    // If we have a high-confidence strategy signal, use it instead of AI
+    if (strategyDecision && strategyDecision.confidence >= 0.7) {
+      logger.info({ strategyId, decision: strategyDecision }, 'Using strategy engine decision (arb/mean reversion)');
+      return strategyDecision;
+    }
+
     // Analyze historical decisions for pattern learning
     const patternAnalysis = historicalDecisions 
       ? this.analyzeHistoricalPatterns(context, historicalDecisions)

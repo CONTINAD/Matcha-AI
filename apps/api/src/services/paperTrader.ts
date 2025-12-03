@@ -1,7 +1,7 @@
 import type { Candle, MarketContext, Decision, StrategyConfig, Position, Trade } from '@matcha-ai/shared';
 import { matchaBrain } from './matchaBrain';
 import { riskManager } from './riskManager';
-import { extractIndicators } from './features';
+import { extractIndicatorsSync } from './features';
 import { dataFeed } from './dataFeed';
 import { predictionTrainer } from './predictionTrainer';
 import { advancedTrainer } from './advancedTrainer';
@@ -195,7 +195,7 @@ export class PaperTrader {
           // Need at least 20 candles for indicators to work properly
           // If we don't have enough, use minimal indicators
           const indicators = recentCandles.length >= minCandles ? {
-            ...extractIndicators(recentCandles, config.indicators),
+            ...extractIndicatorsSync(recentCandles, config.indicators),
             orderBookImbalance: snapshot?.orderBook?.imbalancePct ?? 0,
             bidAskSpreadPct: snapshot?.orderBook?.bidAskSpreadPct ?? 0,
             vwapDeviationPct:
@@ -254,7 +254,7 @@ export class PaperTrader {
             const tempCandles = [...recentCandles];
             tempCandles[tempCandles.length - 1] = candle; // Update last candle with latest
             const updatedIndicators = {
-              ...extractIndicators(tempCandles, config.indicators),
+              ...extractIndicatorsSync(tempCandles, config.indicators),
               orderBookImbalance: snapshot?.orderBook?.imbalancePct ?? 0,
               bidAskSpreadPct: snapshot?.orderBook?.bidAskSpreadPct ?? 0,
               vwapDeviationPct:

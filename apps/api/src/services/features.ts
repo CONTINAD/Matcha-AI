@@ -306,9 +306,90 @@ export function calculateTrendStrength(candles: Candle[], period = 20): number {
 }
 
 /**
- * Extract all indicators from recent candles (enhanced)
+ * Extract all indicators from recent candles (enhanced with parallel calculation)
  */
-export function extractIndicators(candles: Candle[], config?: { rsi?: { period: number }; ema?: { fast: number; slow: number } }): Indicators {
+export async function extractIndicators(candles: Candle[], config?: { rsi?: { period: number }; ema?: { fast: number; slow: number } }): Promise<Indicators> {
+  if (candles.length === 0) return {};
+
+  const indicators: Indicators = {};
+
+  // Calculate all indicators in parallel for better performance
+  const [
+    rsi,
+    emaFast,
+    emaSlow,
+    volatility,
+    sma20,
+    sma50,
+    volumeMA,
+    macd,
+    bollinger,
+    stochastic,
+    adx,
+    williamsR,
+    cci,
+    momentum,
+    sr,
+    trendStrength,
+  ] = await Promise.all([
+    // Basic indicators
+    Promise.resolve(config?.rsi ? calculateRSI(candles, config.rsi.period) : calculateRSI(candles, 14)),
+    Promise.resolve(config?.ema ? calculateEMA(candles, config.ema.fast) : calculateEMA(candles, 12)),
+    Promise.resolve(config?.ema ? calculateEMA(candles, config.ema.slow) : calculateEMA(candles, 26)),
+    Promise.resolve(calculateATR(candles)),
+    Promise.resolve(calculateSMA(candles, 20)),
+    Promise.resolve(calculateSMA(candles, 50)),
+    Promise.resolve(calculateSMA(candles, 20, 'close')),
+    // Advanced indicators
+    Promise.resolve(calculateMACD(candles)),
+    Promise.resolve(calculateBollingerBands(candles)),
+    Promise.resolve(calculateStochastic(candles)),
+    Promise.resolve(calculateADX(candles)),
+    Promise.resolve(calculateWilliamsR(candles)),
+    Promise.resolve(calculateCCI(candles)),
+    Promise.resolve(calculateMomentum(candles)),
+    // Pattern recognition
+    Promise.resolve(detectSupportResistance(candles)),
+    Promise.resolve(calculateTrendStrength(candles)),
+  ]);
+
+  // Assign results
+  indicators.rsi = rsi;
+  indicators.emaFast = emaFast;
+  indicators.emaSlow = emaSlow;
+  indicators.emaTrend = emaFast > emaSlow ? 1 : emaFast < emaSlow ? -1 : 0;
+  indicators.volatility = volatility;
+  indicators.sma20 = sma20;
+  indicators.sma50 = sma50;
+  indicators.volumeMA = volumeMA;
+
+  indicators.macd = macd.macd;
+  indicators.macdSignal = macd.signal;
+  indicators.macdHistogram = macd.histogram;
+
+  indicators.bollingerUpper = bollinger.upper;
+  indicators.bollingerMiddle = bollinger.middle;
+  indicators.bollingerLower = bollinger.lower;
+
+  indicators.stochasticK = stochastic.k;
+  indicators.stochasticD = stochastic.d;
+
+  indicators.adx = adx;
+  indicators.williamsR = williamsR;
+  indicators.cci = cci;
+  indicators.momentum = momentum;
+
+  indicators.supportLevel = sr.support;
+  indicators.resistanceLevel = sr.resistance;
+  indicators.trendStrength = trendStrength;
+
+  return indicators;
+}
+
+/**
+ * Synchronous version for backwards compatibility (deprecated - use async version)
+ */
+export function extractIndicatorsSync(candles: Candle[], config?: { rsi?: { period: number }; ema?: { fast: number; slow: number } }): Indicators {
   if (candles.length === 0) return {};
 
   const indicators: Indicators = {};

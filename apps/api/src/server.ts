@@ -1,4 +1,5 @@
 import Fastify from 'fastify';
+import rateLimit from '@fastify/rate-limit';
 import { config } from './config/env';
 import { logger } from './config/logger';
 import { strategyRoutes } from './routes/strategies';
@@ -39,6 +40,25 @@ server.register(walletRoutes);
 // Start server
 const start = async () => {
   try {
+    // Register rate limiting
+    await server.register(rateLimit, {
+      max: 100, // 100 requests
+      timeWindow: '1 minute', // per minute
+      keyGenerator: (request) => {
+        // Use IP address as key
+        return request.ip || request.socket.remoteAddress || 'unknown';
+      },
+      allowList: ['127.0.0.1', '::1'], // Allow localhost
+      errorResponseBuilder: (request, context) => {
+        return {
+          error: 'Rate limit exceeded',
+          message: `Too many requests. Limit: ${context.max} per ${context.timeWindow}`,
+          retryAfter: Math.ceil(context.ttl / 1000),
+        };
+      },
+    });
+    logger.info('Rate limiting enabled (100 req/min)');
+
     await server.listen({ port: config.server.port, host: '0.0.0.0' });
     logger.info({ port: config.server.port }, 'API server started');
     
