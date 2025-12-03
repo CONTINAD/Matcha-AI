@@ -1,21 +1,21 @@
 import type { Candle } from '@matcha-ai/shared';
-import { extractIndicators } from './features';
+import { extractIndicatorsSync } from './features';
 import { logger } from '../config/logger';
 
 export interface MultiTimeframeContext {
   primary: {
     timeframe: string;
-    indicators: ReturnType<typeof extractIndicators>;
+    indicators: ReturnType<typeof extractIndicatorsSync>;
     trend: 'up' | 'down' | 'sideways';
   };
   higher: {
     timeframe: string;
-    indicators: ReturnType<typeof extractIndicators>;
+    indicators: ReturnType<typeof extractIndicatorsSync>;
     trend: 'up' | 'down' | 'sideways';
   };
   lower: {
     timeframe: string;
-    indicators: ReturnType<typeof extractIndicators>;
+    indicators: ReturnType<typeof extractIndicatorsSync>;
     trend: 'up' | 'down' | 'sideways';
   };
 }
@@ -30,9 +30,9 @@ export class MultiTimeframeAnalysis {
     lowerCandles: Candle[],
     primaryTimeframe: string
   ): MultiTimeframeContext {
-    const primaryIndicators = extractIndicators(primaryCandles);
-    const higherIndicators = extractIndicators(higherCandles);
-    const lowerIndicators = extractIndicators(lowerCandles);
+    const primaryIndicators = extractIndicatorsSync(primaryCandles);
+    const higherIndicators = extractIndicatorsSync(higherCandles);
+    const lowerIndicators = extractIndicatorsSync(lowerCandles);
 
     // Determine trends
     const primaryTrend = this.determineTrend(primaryIndicators);
@@ -61,7 +61,7 @@ export class MultiTimeframeAnalysis {
   /**
    * Determine trend from indicators
    */
-  private determineTrend(indicators: ReturnType<typeof extractIndicators>): 'up' | 'down' | 'sideways' {
+  private determineTrend(indicators: ReturnType<typeof extractIndicatorsSync>): 'up' | 'down' | 'sideways' {
     const emaTrend = indicators.emaTrend || 0;
     const macd = indicators.macd || 0;
     const rsi = indicators.rsi || 50;

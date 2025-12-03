@@ -1,7 +1,7 @@
 import type { Candle, MarketContext, Decision, StrategyConfig, Position, ZeroXSwapTx, Trade } from '@matcha-ai/shared';
 import { matchaBrain } from './matchaBrain';
 import { riskManager } from './riskManager';
-import { extractIndicators } from './features';
+import { extractIndicatorsSync } from './features';
 import { dataFeed } from './dataFeed';
 import { zeroExService } from './zeroExService';
 import { getTokenAddress } from '@matcha-ai/shared';
@@ -95,9 +95,9 @@ export class LiveTrader {
           }
 
           const indicators = {
-            ...extractIndicators(recentCandles, strategyConfig.indicators),
-            orderBookImbalance: snapshot?.orderBook?.imbalancePct ?? 0,
-            bidAskSpreadPct: snapshot?.orderBook?.bidAskSpreadPct ?? 0,
+            ...extractIndicatorsSync(recentCandles, strategyConfig.indicators),
+            orderBookImbalance: 0, // Not available with 0x-only
+            bidAskSpreadPct: 0, // Not available with 0x-only
             vwapDeviationPct:
               snapshot?.vwap && candle.close
                 ? ((snapshot.vwap - candle.close) / candle.close) * 100

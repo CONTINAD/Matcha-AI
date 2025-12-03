@@ -52,7 +52,7 @@ const start = async () => {
       errorResponseBuilder: (request, context) => {
         return {
           error: 'Rate limit exceeded',
-          message: `Too many requests. Limit: ${context.max} per ${context.timeWindow}`,
+          message: `Too many requests. Limit: ${context.max} per minute`,
           retryAfter: Math.ceil(context.ttl / 1000),
         };
       },

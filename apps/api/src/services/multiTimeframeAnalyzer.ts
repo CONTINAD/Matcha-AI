@@ -1,5 +1,5 @@
 import { dataFeed } from './dataFeed';
-import { extractIndicators } from './features';
+import { extractIndicatorsSync } from './features';
 import type { Candle, MarketContext } from '@matcha-ai/shared';
 import { logger } from '../config/logger';
 
@@ -120,7 +120,7 @@ export class MultiTimeframeAnalyzer {
       };
     }
 
-    const indicators = extractIndicators(candles);
+    const indicators = extractIndicatorsSync(candles);
     const trend = this.determineTrend(indicators, candles);
     const strength = this.calculateTrendStrength(indicators, candles);
 

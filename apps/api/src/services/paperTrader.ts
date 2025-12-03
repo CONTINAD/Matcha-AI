@@ -192,12 +192,13 @@ export class PaperTrader {
             hasSnapshot: !!snapshot 
           }, 'Processing market data');
           
-          // Need at least 20 candles for indicators to work properly
+          // Need at least 5 candles for indicators to work properly
           // If we don't have enough, use minimal indicators
+          const minCandles = 5; // Reduced from 20 for faster trading
           const indicators = recentCandles.length >= minCandles ? {
             ...extractIndicatorsSync(recentCandles, config.indicators),
-            orderBookImbalance: snapshot?.orderBook?.imbalancePct ?? 0,
-            bidAskSpreadPct: snapshot?.orderBook?.bidAskSpreadPct ?? 0,
+            orderBookImbalance: 0, // Not available with 0x-only
+            bidAskSpreadPct: 0, // Not available with 0x-only
             vwapDeviationPct:
               snapshot?.vwap && candle.close
                 ? ((snapshot.vwap - candle.close) / candle.close) * 100
@@ -219,8 +220,8 @@ export class PaperTrader {
             atr: latestCandle.close * 0.01, // 1% default ATR
             volatility: 0.01,
             volume: latestCandle.volume || 0,
-            orderBookImbalance: snapshot?.orderBook?.imbalancePct ?? 0,
-            bidAskSpreadPct: snapshot?.orderBook?.bidAskSpreadPct ?? 0,
+            orderBookImbalance: 0, // Not available with 0x-only
+            bidAskSpreadPct: 0, // Not available with 0x-only
             vwapDeviationPct: 0,
             dexVolumeUsd24h: snapshot?.dexVolumeUsd24h ?? 0,
           };
@@ -255,8 +256,8 @@ export class PaperTrader {
             tempCandles[tempCandles.length - 1] = candle; // Update last candle with latest
             const updatedIndicators = {
               ...extractIndicatorsSync(tempCandles, config.indicators),
-              orderBookImbalance: snapshot?.orderBook?.imbalancePct ?? 0,
-              bidAskSpreadPct: snapshot?.orderBook?.bidAskSpreadPct ?? 0,
+              orderBookImbalance: 0, // Not available with 0x-only
+              bidAskSpreadPct: 0, // Not available with 0x-only
               vwapDeviationPct:
                 snapshot?.vwap && candle.close
                   ? ((snapshot.vwap - candle.close) / candle.close) * 100
