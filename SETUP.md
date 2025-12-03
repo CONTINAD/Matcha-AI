@@ -11,10 +11,10 @@ pnpm install
 Create a `.env` file in the root directory with your API keys:
 
 ```bash
-# OpenAI API Key (provided)
+# OpenAI API Key (get from https://platform.openai.com/api-keys)
 OPENAI_API_KEY=your_openai_api_key_here
 
-# 0x.org API Key (provided)
+# 0x.org API Key (get from https://0x.org/docs/api)
 ZEROX_API_KEY=your_0x_api_key_here
 
 # Database (adjust if needed)
