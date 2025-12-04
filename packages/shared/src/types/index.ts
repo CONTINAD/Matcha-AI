@@ -77,6 +77,12 @@ export interface StrategyConfig {
     minConfidence?: number;
     minVolume?: number;
   };
+  ai?: {
+    mode: 'OFF' | 'ASSIST' | 'FULL';
+    model?: 'gpt-4o-mini' | 'gpt-4o' | 'gpt-5.1';
+    confidenceThreshold?: number; // Only use AI if fast decision confidence < this
+    minTradesForAI?: number; // Only use AI after N trades
+  };
 }
 
 export interface Trade {

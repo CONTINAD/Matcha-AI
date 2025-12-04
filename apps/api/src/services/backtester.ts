@@ -7,15 +7,13 @@ import type {
   PerformanceMetrics,
   Position,
 } from '@matcha-ai/shared';
-import { matchaBrain } from './matchaBrain';
 import { riskManager } from './riskManager';
-import { extractIndicatorsSync } from './features';
-import { reinforcementLearning } from './reinforcementLearning';
-import { predictionTrainer } from './predictionTrainer';
 import { calculatePnL, calculateSharpe, calculateMaxDrawdown } from '@matcha-ai/shared';
 import { logger } from '../config/logger';
 import { wsService } from './websocket';
 import { checkStopLossTakeProfit, TrailingStopTracker } from './stopLossTakeProfit';
+import { decisionEngine } from './decisionEngine';
+import { predictionTrainer } from './predictionTrainer';
 
 export interface BacktestParams {
   strategyConfig: StrategyConfig;
@@ -105,33 +103,20 @@ export class Backtester {
         lastDailyReset = currentCandle.timestamp;
       }
 
-      // Extract indicators (using sync version for performance in backtests)
-      const indicators = extractIndicatorsSync(recentCandles, strategyConfig.indicators) as any;
-
-      // Build market context
+      // Build market context using unified decision engine
       const openPositions = Array.from(positions.values());
-      const realizedPnl = trades.filter((t) => t.exitPrice).reduce((sum, t) => sum + t.pnl, 0);
-      const winRate =
-        trades.length > 0
-          ? trades.filter((t) => t.pnl > 0).length / trades.filter((t) => t.exitPrice).length
-          : 0;
-
-      const context: MarketContext = {
-        recentCandles: recentCandles.slice(-20), // Last 20 candles
-        indicators,
+      const context = decisionEngine.buildContext(
+        recentCandles,
         openPositions,
-        performance: {
-          realizedPnl,
-          maxDrawdown: calculateMaxDrawdown(equityCurve),
-          winRate,
-          sharpe: returns.length > 0 ? calculateSharpe(returns) : undefined,
-        },
-        riskLimits: strategyConfig.riskLimits,
-        currentEquity: equity,
+        trades,
+        equity,
         dailyPnl,
-      };
+        strategyConfig.riskLimits,
+        equityCurve,
+        returns
+      );
 
-      // Get AI decision (with ensemble voting for smarter decisions)
+      // Get decision using unified decision engine
       let decision: Decision;
       let predictionId: string | null = null; // Declare outside if/else for scope
       
@@ -152,49 +137,35 @@ export class Backtester {
           notes: dailyLimitHit ? 'Risk: daily loss limit exceeded' : 'Risk: drawdown limit exceeded',
         };
       } else {
-        // Store prediction before making decision (for training)
+        // Use unified decision engine
+        // Fast mode: AI is OFF
+        // Normal mode: AI mode from config (defaults to ASSIST)
+        const aiMode = params.fastMode ? 'OFF' : (strategyConfig.ai?.mode || 'ASSIST');
         
-        // Fast mode: use rule-based decisions instead of AI
-        if (params.fastMode) {
-          decision = this.getFastDecision(context, indicators);
-        } else {
+        // Get historical decisions for AI (only if not fast mode)
+        const historicalDecisions = 
+          !params.fastMode && strategyId
+            ? await predictionTrainer.getHistoricalDecisions(strategyId, 30)
+            : undefined;
+
+        decision = await decisionEngine.decide(context, strategyConfig, {
+          aiMode,
+          strategyId,
+          historicalDecisions,
+        });
+
+        // Store prediction for training (if we have strategyId and not fast mode)
+        if (!params.fastMode && strategyId && strategyId !== 'backtest') {
           try {
-            // Get historical decisions for learning
-            const historicalDecisions = strategyId 
-              ? await predictionTrainer.getHistoricalDecisions(strategyId, 30)
-              : undefined;
-
-            // Use ensemble decision for better accuracy (3 votes)
-            decision = await matchaBrain.getEnsembleDecision(context, strategyConfig, 3);
-            
-            // Apply reinforcement learning adjustments if we have historical data
-            if (trades.length > 10) {
-              const patterns = await reinforcementLearning.analyzePatterns('backtest');
-              decision = reinforcementLearning.adjustDecisionByLearning(decision, patterns);
-            }
-
-            // Improve decision based on past predictions
-            if (strategyId && historicalDecisions && historicalDecisions.length > 5) {
-              decision = await predictionTrainer.improveDecision(strategyId, decision, context);
-            }
-
-            // Store prediction for training (if we have strategyId)
-            if (strategyId && strategyId !== 'backtest') {
-              try {
-                predictionId = await predictionTrainer.storePrediction(
-                  strategyId,
-                  strategyConfig.universe[0] || 'UNKNOWN',
-                  decision,
-                  context,
-                  indicators
-                );
-              } catch (error) {
-                logger.warn({ error }, 'Failed to store prediction');
-              }
-            }
+            predictionId = await predictionTrainer.storePrediction(
+              strategyId,
+              strategyConfig.universe[0] || 'UNKNOWN',
+              decision,
+              context,
+              context.indicators
+            );
           } catch (error) {
-            logger.error({ error }, 'Error getting decision, using fast fallback');
-            decision = this.getFastDecision(context, indicators);
+            logger.warn({ error }, 'Failed to store prediction');
           }
         }
       }
@@ -618,161 +589,6 @@ export class Backtester {
     };
   }
 
-  /**
-   * Fast rule-based decision (no AI calls) - IMPROVED FOR PROFITABILITY
-   * Uses multiple technical indicators for better entry/exit timing
-   */
-  private getFastDecision(context: MarketContext, indicators: any): Decision {
-    const rsi = indicators?.rsi;
-    const ema20 = indicators?.ema20;
-    const ema50 = indicators?.ema50;
-    const sma20 = indicators?.sma20;
-    const sma50 = indicators?.sma50;
-    const macd = indicators?.macd;
-    const macdSignal = indicators?.macdSignal;
-    const macdHistogram = indicators?.macdHistogram;
-    const bbUpper = indicators?.bbUpper;
-    const bbLower = indicators?.bbLower;
-    const bbMiddle = indicators?.bbMiddle;
-    const adx = indicators?.adx;
-    const price = context.recentCandles[context.recentCandles.length - 1]?.close || 0;
-    const candles = context.recentCandles;
-    
-    let action: 'long' | 'short' | 'flat' = 'flat';
-    let confidence = 0.3;
-    let signalStrength = 0;
-    
-    // Use EMA or SMA, whichever is available
-    const shortMA = ema20 || sma20;
-    const longMA = ema50 || sma50;
-    
-    if (price > 0 && shortMA && longMA) {
-      // 1. TREND SIGNAL (Strongest signal)
-      const bullishTrend = shortMA > longMA;
-      const bearishTrend = shortMA < longMA;
-      const trendStrength = Math.abs((shortMA - longMA) / longMA);
-      
-      if (bullishTrend && trendStrength > 0.005) { // 0.5% separation minimum
-        signalStrength += 3;
-      } else if (bearishTrend && trendStrength > 0.005) {
-        signalStrength -= 3;
-      }
-      
-      // 2. RSI MOMENTUM (Confirms trend)
-      if (rsi) {
-        if (bullishTrend && rsi > 50 && rsi < 70) { // Not overbought, but strong
-          signalStrength += 2;
-        } else if (bullishTrend && rsi > 40 && rsi < 50) { // Building momentum
-          signalStrength += 1;
-        } else if (bearishTrend && rsi < 50 && rsi > 30) { // Not oversold, but weak
-          signalStrength -= 2;
-        } else if (bearishTrend && rsi < 60 && rsi > 50) { // Losing momentum
-          signalStrength -= 1;
-        }
-        
-        // Avoid extreme RSI (overbought/oversold reversals)
-        if (rsi > 75) signalStrength -= 2; // Overbought - avoid longs
-        if (rsi < 25) signalStrength += 2; // Oversold - avoid shorts
-      }
-      
-      // 3. MACD CROSSOVER (Momentum confirmation)
-      if (macd && macdSignal && macdHistogram) {
-        if (macd > macdSignal && macdHistogram > 0) { // Bullish MACD
-          signalStrength += 2;
-        } else if (macd < macdSignal && macdHistogram < 0) { // Bearish MACD
-          signalStrength -= 2;
-        }
-      }
-      
-      // 4. BOLLINGER BANDS (Volatility and mean reversion)
-      if (bbUpper && bbLower && bbMiddle) {
-        const bbPosition = (price - bbLower) / (bbUpper - bbLower);
-        if (bullishTrend && bbPosition < 0.3 && price < bbMiddle) { // Near lower band, oversold
-          signalStrength += 1.5;
-        } else if (bearishTrend && bbPosition > 0.7 && price > bbMiddle) { // Near upper band, overbought
-          signalStrength -= 1.5;
-        }
-      }
-      
-      // 5. ADX (Trend strength - only trade in strong trends)
-      if (adx) {
-        if (adx > 25) { // Strong trend
-          signalStrength *= 1.2; // Boost all signals
-        } else if (adx < 20) { // Weak trend
-          signalStrength *= 0.7; // Reduce signals in choppy markets
-        }
-      }
-      
-      // 6. PRICE MOMENTUM (Recent price action)
-      if (candles.length >= 3) {
-        const recent = candles.slice(-3);
-        const momentum = (recent[2].close - recent[0].close) / recent[0].close;
-        if (momentum > 0.02 && bullishTrend) { // 2%+ momentum up
-          signalStrength += 1;
-        } else if (momentum < -0.02 && bearishTrend) { // 2%+ momentum down
-          signalStrength -= 1;
-        }
-      }
-      
-      // Convert signal strength to action and confidence
-      // Lower threshold for entry (3 instead of 4) to generate more trades
-      // But require stronger signals for higher confidence
-      if (signalStrength >= 3) {
-        action = 'long';
-        // Scale confidence: 3 = 0.5, 4 = 0.6, 5 = 0.7, 6+ = 0.8+
-        confidence = Math.min(0.85, 0.4 + (signalStrength - 3) * 0.15);
-      } else if (signalStrength <= -3) {
-        action = 'short';
-        confidence = Math.min(0.85, 0.4 + (Math.abs(signalStrength) - 3) * 0.15);
-      } else {
-        // Weak signal - stay flat
-        action = 'flat';
-        confidence = 0.2;
-      }
-      
-      // Adjust confidence based on recent performance
-      const totalTrades = context.performance.totalTrades || 0;
-      if (context.performance.winRate > 0.55 && totalTrades > 10) {
-        confidence = Math.min(0.9, confidence * 1.15); // Boost more if winning
-      } else if (context.performance.winRate < 0.45 && totalTrades > 10) {
-        confidence = Math.max(0.3, confidence * 0.85); // Reduce more if losing
-      }
-      
-      // Additional filter: Only take trades if we have enough indicators confirming
-      const indicatorsPresent = [rsi, shortMA, longMA, macd, bbUpper, bbLower].filter(Boolean).length;
-      if (indicatorsPresent < 3 && action !== 'flat') {
-        // Need at least 3 indicators to confirm
-        action = 'flat';
-        confidence = 0.2;
-      }
-    } else if (price > 0 && candles.length >= 5) {
-      // Fallback: Enhanced price momentum with multiple candles
-      const recent = candles.slice(-5);
-      const shortMomentum = (recent[4].close - recent[2].close) / recent[2].close;
-      const longMomentum = (recent[4].close - recent[0].close) / recent[0].close;
-      
-      if (shortMomentum > 0.015 && longMomentum > 0.01) { // Consistent upward momentum
-        action = 'long';
-        confidence = 0.5;
-      } else if (shortMomentum < -0.015 && longMomentum < -0.01) { // Consistent downward momentum
-        action = 'short';
-        confidence = 0.5;
-      }
-    }
-    
-    // Ensure minimum confidence for taking trades
-    if (action !== 'flat' && confidence < 0.4) {
-      action = 'flat';
-      confidence = 0.2;
-    }
-    
-    return {
-      action,
-      confidence,
-      targetPositionSizePct: confidence * (context.riskLimits?.maxPositionPct || 10),
-      notes: `Fast mode: signal strength ${signalStrength.toFixed(1)}, ${action} with ${(confidence * 100).toFixed(0)}% confidence`,
-    };
-  }
 
   /**
    * Estimate payoff ratio (average win / average loss)

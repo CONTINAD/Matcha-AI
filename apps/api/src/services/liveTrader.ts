@@ -1,7 +1,5 @@
 import type { Candle, MarketContext, Decision, StrategyConfig, Position, ZeroXSwapTx, Trade } from '@matcha-ai/shared';
-import { matchaBrain } from './matchaBrain';
 import { riskManager } from './riskManager';
-import { extractIndicatorsSync } from './features';
 import { dataFeed } from './dataFeed';
 import { zeroExService } from './zeroExService';
 import { transactionTracker } from './transactionTracker';
@@ -11,6 +9,7 @@ import { getTokenAddress } from '@matcha-ai/shared';
 import { PrismaClient } from '@prisma/client';
 import { logger } from '../config/logger';
 import { config } from '../config/env';
+import { decisionEngine } from './decisionEngine';
 
 const prisma = new PrismaClient();
 
@@ -133,19 +132,18 @@ export class LiveTrader {
           // Get current equity from recent trades (simplified)
           const equity = 10000 + realizedPnl; // Starting equity + realized PnL
 
-          const context: MarketContext = {
-            recentCandles: recentCandles.slice(-20),
-            indicators,
-            openPositions: Array.from(positions.values()),
-            performance: {
-              realizedPnl,
-              maxDrawdown: 0,
-              winRate,
-            },
-            riskLimits: strategyConfig.riskLimits,
-            currentEquity: equity,
+          // Build context using unified decision engine
+          const context = decisionEngine.buildContext(
+            recentCandles,
+            Array.from(positions.values()),
+            recentTrades as Trade[],
+            equity,
             dailyPnl,
-          };
+            strategyConfig.riskLimits
+          );
+          
+          // Update context with computed indicators
+          context.indicators = indicators;
 
           const hitDailyLimit = riskManager.isDailyLossLimitExceeded(
             dailyPnl,
@@ -153,7 +151,7 @@ export class LiveTrader {
             strategyConfig.riskLimits.maxDailyLossPct
           );
 
-          // Get decision with LLM throttling
+          // Get decision using unified decision engine
           let decision: Decision;
           if (hitDailyLimit) {
             decision = {
@@ -175,15 +173,19 @@ export class LiveTrader {
               logger.debug({ strategyId }, 'Using cached decision (LLM throttled)');
             } else {
               try {
-                // Get historical decisions for learning
-                const historicalDecisions = await predictionTrainer.getHistoricalDecisions(strategyId, 30);
-                
-                // Call LLM with timeout
-                const decisionPromise = matchaBrain.getDecision(context, strategyConfig, historicalDecisions, strategyId);
-                const timeoutPromise = new Promise<Decision>((_, reject) => 
-                  setTimeout(() => reject(new Error('LLM timeout')), 10000)
-                );
-                decision = await Promise.race([decisionPromise, timeoutPromise]);
+                // Get historical decisions for AI (only if not OFF mode)
+                const aiConfig = strategyConfig.ai || { mode: 'ASSIST' };
+                const historicalDecisions = 
+                  aiConfig.mode !== 'OFF'
+                    ? await predictionTrainer.getHistoricalDecisions(strategyId, 30)
+                    : undefined;
+
+                // Use unified decision engine
+                decision = await decisionEngine.decide(context, strategyConfig, {
+                  aiMode: aiConfig.mode,
+                  strategyId,
+                  historicalDecisions,
+                });
                 
                 // Cache the decision
                 const contextHash = this.hashContext(context, indicators);
@@ -193,9 +195,9 @@ export class LiveTrader {
                   contextHash,
                 });
               } catch (error) {
-                logger.warn({ error }, 'LLM decision failed or timed out, using fast fallback');
+                logger.warn({ error }, 'Decision engine failed or timed out, using fast fallback');
                 // Fallback to rule-based decision
-                decision = this.getFastDecision(context, indicators);
+                decision = decisionEngine.getFastDecision(context, indicators);
               }
             }
           }

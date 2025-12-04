@@ -10,7 +10,7 @@ const prisma = new PrismaClient();
  */
 export class AutoTrainingScheduler {
   private interval: NodeJS.Timeout | null = null;
-  private readonly TRAINING_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
+  private readonly TRAINING_INTERVAL_MS = 60 * 60 * 1000; // 60 minutes (changed from 10 minutes)
 
   /**
    * Start the auto-training scheduler

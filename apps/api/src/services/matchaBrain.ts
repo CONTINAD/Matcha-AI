@@ -36,53 +36,57 @@ export class MatchaBrain {
     context: MarketContext, 
     strategyConfig: StrategyConfig, 
     historicalDecisions?: Array<{ decision: Decision; outcome?: 'win' | 'loss' | 'neutral' }>,
-    strategyId?: string
+    strategyId?: string,
+    options?: {
+      mode?: 'OFF' | 'ASSIST' | 'FULL';
+      model?: 'gpt-4o-mini' | 'gpt-4o' | 'gpt-5.1';
+    }
   ): Promise<Decision> {
-    const systemPrompt = `You are Matcha AI, an advanced quantitative trading system with deep market analysis capabilities. Your goal is to maximize risk-adjusted returns through sophisticated pattern recognition and adaptive learning.
+    const aiMode = options?.mode || 'ASSIST';
+    const model = options?.model || (aiMode === 'FULL' ? 'gpt-5.1' : 'gpt-4o-mini');
+    
+    // Shortened system prompt (~150 tokens vs ~500)
+    const systemPrompt = aiMode === 'FULL'
+      ? `You are Matcha AI, a quantitative trading system. Maximize risk-adjusted returns.
 
-EXPERTISE AREAS:
-- Technical analysis (indicators, patterns, trends, multi-timeframe)
-- Market regime detection (trending, ranging, volatile, calm, choppy)
-- Risk management and position sizing (Kelly Criterion, VaR)
-- Learning from historical performance patterns
-- Multi-factor decision making with ensemble methods
-- Liquidity and volatility analysis
+RULES:
+1. NEVER violate risk limits (maxPositionPct, maxDailyLossPct)
+2. If daily loss limit exceeded, return action: "flat", confidence: 0
+3. Only take positions when confidence >= 0.6 and multiple factors align
+4. In ranging markets: prefer mean reversion or stay flat
+5. In trending markets: prefer momentum/trend following
+6. In high volatility: reduce position size or stay flat
+7. Consider recent win rate and drawdown
 
-CRITICAL RULES:
-1. NEVER violate risk limits (maxPositionPct, maxDailyLossPct, maxLeverage)
-2. If daily loss exceeds maxDailyLossPct, return action: "flat" and confidence: 0
-3. Avoid over-trading and revenge trading - quality over quantity
-4. Only take positions when confidence is high (>= 0.6) and multiple factors align
-5. Consider current positions and avoid over-concentration
-6. Learn from past decisions - if similar conditions led to losses, be more cautious
-7. Adapt confidence based on market conditions and recent performance
-8. In ranging/choppy markets, prefer mean reversion or stay flat
-9. In trending markets, prefer momentum/trend following
-10. In high volatility, reduce position size or stay flat
-11. When drawdown is high (>5%), be more conservative
+ANALYSIS:
+- Market Regime: trending/ranging/volatile/calm/choppy
+- Technical Signals: RSI, EMA, MACD, Bollinger Bands, ATR
+- Risk: Evaluate exposure and market conditions
+- Performance: Win rate, drawdown, Sharpe ratio
 
-ANALYSIS FRAMEWORK:
-1. Market Regime: Identify if market is trending, ranging, volatile, calm, or choppy
-   - Trending: Strong directional movement, high momentum
-   - Ranging: Sideways movement, support/resistance levels
-   - Volatile: High price swings, unpredictable
-   - Calm: Low volatility, stable prices
-   - Choppy: Erratic movements, no clear direction
-2. Technical Signals: Analyze ALL indicators for confluence
-   - RSI: Overbought (>70) or oversold (<30) conditions
-   - EMA: Trend direction and strength
-   - MACD: Momentum shifts
-   - Bollinger Bands: Volatility and mean reversion opportunities
-   - ATR: Volatility measurement
-   - Volume: Confirmation of moves
-3. Multi-Timeframe: Consider higher timeframe trends (if available)
-4. Risk Assessment: Evaluate current risk exposure and market conditions
-5. Performance Context: Consider recent win rate, drawdown, and Sharpe ratio
-6. Pattern Recognition: Look for patterns that led to successful trades
-7. Position Sizing: Adjust size based on confidence, risk, and market regime
-8. Entry/Exit Timing: Wait for optimal entry, use stop loss/take profit
+Respond with JSON:
+{
+  "action": "long" | "short" | "flat",
+  "confidence": number (0-1),
+  "targetPositionSizePct": number (0-100),
+  "notes": string,
+  "reasoning": {
+    "marketRegime": "trending" | "ranging" | "volatile" | "uncertain",
+    "keyFactors": string[],
+    "riskAssessment": "low" | "medium" | "high",
+    "patternMatch": string | null
+  }
+}`
+      : `You are Matcha AI, a trading assistant. Provide trading decisions when fast engine is uncertain.
 
-You must respond with a valid JSON object matching this structure:
+RULES:
+1. NEVER violate risk limits
+2. If daily loss limit exceeded, return action: "flat", confidence: 0
+3. Only suggest trades when confidence >= 0.5
+4. Consider market regime (trending/ranging/volatile)
+5. Use indicators: RSI, EMA, MACD, Bollinger Bands
+
+Respond with JSON:
 {
   "action": "long" | "short" | "flat",
   "confidence": number (0-1),
@@ -180,32 +184,36 @@ You must respond with a valid JSON object matching this structure:
       return strategyDecision;
     }
 
-    // Analyze historical decisions for pattern learning
-    const patternAnalysis = historicalDecisions 
+    // Analyze historical decisions for pattern learning (only for FULL mode)
+    // ASSIST mode: Skip heavy analysis to reduce token usage
+    const patternAnalysis = aiMode === 'FULL' && historicalDecisions 
       ? this.analyzeHistoricalPatterns(context, historicalDecisions)
       : null;
 
-    // Get advanced training insights for better decisions
+    // Get advanced training insights for better decisions (only for FULL mode)
+    // ASSIST mode: Skip to reduce token usage and API calls
     let trainingInsights = null;
-    try {
-      const targetStrategyId = strategyId || '';
-      if (targetStrategyId) {
-        const metrics = await advancedTrainer.analyzePredictions(
-          targetStrategyId,
-          100
-        );
-        if (metrics.bestPatterns.length > 0 || metrics.worstPatterns.length > 0) {
-          trainingInsights = {
-            bestPatterns: metrics.bestPatterns.slice(0, 3),
-            worstPatterns: metrics.worstPatterns.slice(0, 3),
-            recentAccuracy: metrics.recentAccuracy,
-            improvement: metrics.improvement,
-          };
+    if (aiMode === 'FULL') {
+      try {
+        const targetStrategyId = strategyId || '';
+        if (targetStrategyId) {
+          const metrics = await advancedTrainer.analyzePredictions(
+            targetStrategyId,
+            100
+          );
+          if (metrics.bestPatterns.length > 0 || metrics.worstPatterns.length > 0) {
+            trainingInsights = {
+              bestPatterns: metrics.bestPatterns.slice(0, 3),
+              worstPatterns: metrics.worstPatterns.slice(0, 3),
+              recentAccuracy: metrics.recentAccuracy,
+              improvement: metrics.improvement,
+            };
+          }
         }
+      } catch (error) {
+        // Training insights are optional
+        logger.debug({ error }, 'Could not get training insights');
       }
-    } catch (error) {
-      // Training insights are optional
-      logger.debug({ error }, 'Could not get training insights');
     }
 
     // Enhanced context with more detail
@@ -227,79 +235,38 @@ You must respond with a valid JSON object matching this structure:
     // Multi-timeframe context (if available)
     const higherTimeframeTrend = indicators.higherTimeframeTrend || null;
 
-    const userPrompt = `Market Context (Enhanced Multi-Factor Analysis):
-- Recent candles: ${recentCandles.length} candles
-- Price trend: ${(priceTrend * 100).toFixed(2)}% over period
-- Price change: ${(priceChange * 100).toFixed(2)}%
-- Market regime: ${marketRegime}
-- Volatility (ATR): ${atr.toFixed(4)} (${volatility > 0.05 ? 'HIGH' : volatility > 0.02 ? 'MEDIUM' : 'LOW'})
-- Volume: Current=${currentVolume.toFixed(0)}, Avg=${avgVolume.toFixed(0)}, Ratio=${volumeRatio.toFixed(2)}x
+    // Shortened user prompt (~300 tokens vs 1000-2000)
+    // Send summary instead of full candles/history
+    const lastCandle = recentCandles[recentCandles.length - 1];
+    const priceChangePct = recentCandles.length >= 2 
+      ? ((lastCandle.close - recentCandles[0].close) / recentCandles[0].close) * 100
+      : 0;
+    
+    // Top 5 historical decisions only (not 30)
+    const topHistoricalDecisions = historicalDecisions?.slice(0, 5) || [];
+    
+    const userPrompt = `Market Summary:
+- Price: ${lastCandle.close.toFixed(2)}, Change: ${priceChangePct.toFixed(2)}% (${recentCandles.length} candles)
+- Regime: ${marketRegime}, Volatility: ${volatility > 0.05 ? 'HIGH' : volatility > 0.02 ? 'MEDIUM' : 'LOW'}
+- Volume: ${(volumeRatio * 100).toFixed(0)}% of avg
 
-Technical Indicators:
-- RSI: ${rsi.toFixed(1)} ${rsi > 70 ? '(OVERBOUGHT)' : rsi < 30 ? '(OVERSOLD)' : '(NEUTRAL)'}
-- EMA Trend: ${emaTrend > 0 ? 'BULLISH' : 'BEARISH'} (${(Math.abs(emaTrend) * 100).toFixed(2)}% strength)
-- MACD: ${macd > 0 ? 'POSITIVE' : 'NEGATIVE'} (${macd.toFixed(4)})
-${bollingerUpper && bollingerLower ? `- Bollinger Bands: Price=${currentPrice.toFixed(2)}, Upper=${bollingerUpper.toFixed(2)}, Lower=${bollingerLower.toFixed(2)}, ${currentPrice > bollingerUpper ? 'ABOVE UPPER' : currentPrice < bollingerLower ? 'BELOW LOWER' : 'WITHIN BANDS'}` : ''}
-${higherTimeframeTrend ? `- Higher Timeframe Trend: ${higherTimeframeTrend > 0 ? 'BULLISH' : 'BEARISH'}` : ''}
-${multiTimeframe ? `
-Multi-Timeframe Analysis:
-- Primary (${multiTimeframe.primary.timeframe}): ${multiTimeframe.primary.trend.toUpperCase()} (${(multiTimeframe.primary.strength * 100).toFixed(1)}% strength)
-- Higher (${multiTimeframe.higher.timeframe}): ${multiTimeframe.higher.trend.toUpperCase()} (${(multiTimeframe.higher.strength * 100).toFixed(1)}% strength)
-- Lower (${multiTimeframe.lower.timeframe}): ${multiTimeframe.lower.trend.toUpperCase()} (${(multiTimeframe.lower.strength * 100).toFixed(1)}% strength)
-- Alignment: ${multiTimeframe.alignment.toUpperCase()} (${(multiTimeframe.confidence * 100).toFixed(1)}% confidence)
-${multiTimeframe.alignment === 'aligned' ? '✅ All timeframes aligned - high confidence trade' : multiTimeframe.alignment === 'conflicting' ? '⚠️ Timeframes conflicting - be cautious' : '⚡ Mixed signals - moderate confidence'}
-` : ''}
+Indicators:
+- RSI: ${rsi.toFixed(1)} ${rsi > 70 ? '(OB)' : rsi < 30 ? '(OS)' : ''}
+- EMA: ${emaTrend > 0 ? 'BULL' : 'BEAR'} ${(Math.abs(emaTrend) * 100).toFixed(1)}%
+- MACD: ${macd > 0 ? '+' : '-'}${Math.abs(macd).toFixed(4)}
+${bollingerUpper && bollingerLower ? `- BB: ${currentPrice > bollingerUpper ? 'ABOVE' : currentPrice < bollingerLower ? 'BELOW' : 'WITHIN'}` : ''}
 
-Position Status:
-- Open positions: ${context.openPositions.length} (${JSON.stringify(context.openPositions.map(p => `${p.symbol} ${p.side} ${p.size.toFixed(4)}`))})
-- Current equity: ${context.currentEquity.toFixed(2)}
-- Daily PnL: ${context.dailyPnl.toFixed(2)} ${context.dailyPnl < 0 ? '⚠️' : ''}
-
-Performance History:
-- Realized PnL: ${context.performance.realizedPnl.toFixed(2)}
-- Max Drawdown: ${context.performance.maxDrawdown.toFixed(2)}% ${context.performance.maxDrawdown > 5 ? '⚠️ HIGH' : ''}
-- Win Rate: ${(context.performance.winRate * 100).toFixed(2)}%
-- Sharpe Ratio: ${context.performance.sharpe?.toFixed(2) || 'N/A'}
-- Total Trades: ${context.performance.totalTrades || 0}
+Performance:
+- Win Rate: ${(context.performance.winRate * 100).toFixed(1)}%, PnL: $${context.performance.realizedPnl.toFixed(2)}
+- Drawdown: ${context.performance.maxDrawdown.toFixed(1)}%, Trades: ${context.performance.totalTrades || 0}
+- Daily PnL: $${context.dailyPnl.toFixed(2)}, Equity: $${context.currentEquity.toFixed(2)}
 
 Risk Limits:
-- Max Position: ${context.riskLimits.maxPositionPct}%
-- Max Daily Loss: ${context.riskLimits.maxDailyLossPct}%
-- Stop Loss: ${context.riskLimits.stopLossPct || 'N/A'}%
-- Take Profit: ${context.riskLimits.takeProfitPct || 'N/A'}%
+- Max Position: ${context.riskLimits.maxPositionPct}%, Max Daily Loss: ${context.riskLimits.maxDailyLossPct}%
 
-${patternAnalysis ? `\nPattern Learning (Historical Analysis):
-${patternAnalysis}` : ''}
-${trainingInsights ? `
-Advanced Training Insights:
-- Recent Accuracy: ${(trainingInsights.recentAccuracy * 100).toFixed(1)}%
-- Improvement: ${(trainingInsights.improvement * 100).toFixed(1)}%
-- Best Patterns to Favor:
-${trainingInsights.bestPatterns.map((p: any) => `  * ${p.pattern}: ${(p.accuracy * 100).toFixed(1)}% accuracy, $${p.avgPnl.toFixed(2)} avg P&L`).join('\n')}
-- Worst Patterns to Avoid:
-${trainingInsights.worstPatterns.map((p: any) => `  * ${p.pattern}: ${(p.accuracy * 100).toFixed(1)}% accuracy, $${p.avgPnl.toFixed(2)} avg P&L`).join('\n')}
-` : ''}
+${topHistoricalDecisions.length > 0 ? `Recent Decisions (${topHistoricalDecisions.length}):\n${topHistoricalDecisions.map((h, i) => `${i + 1}. ${h.decision.action} (${(h.decision.confidence * 100).toFixed(0)}%) - ${h.outcome || 'pending'}`).join('\n')}` : ''}
 
-Strategy Config:
-- Base asset: ${strategyConfig.baseAsset}
-- Universe: ${strategyConfig.universe.join(', ')}
-- Timeframe: ${strategyConfig.timeframe}
-- Strategy type: ${strategyConfig.indicators?.ema ? 'Momentum/Trend' : strategyConfig.indicators?.rsi ? 'Mean Reversion' : 'General'}
-
-DECISION REQUIREMENTS:
-1. Analyze market regime and adapt strategy accordingly
-2. Check for indicator confluence (multiple signals agreeing)
-3. Consider volume confirmation (higher volume = stronger signal)
-4. Evaluate risk/reward ratio
-5. Respect current drawdown (be more conservative if high)
-6. Avoid trading in unfavorable conditions (low liquidity, extreme volatility)
-7. Only trade when confidence >= 0.6 and multiple factors align
-
-Make a sophisticated trading decision considering ALL factors. Explain your reasoning in detail, including:
-- Why this regime favors your chosen action
-- Which indicators support your decision
-- Risk/reward assessment
-- Position sizing rationale`;
+Make a trading decision. Consider regime, indicators, and risk limits.`;
 
     // Define tools for function calling
     const tools = [
@@ -404,6 +371,7 @@ Make a sophisticated trading decision considering ALL factors. Explain your reas
     } as const;
 
     const endTimer = decisionLatency.startTimer({ mode: 'single' });
+    
     try {
       // Get strategy chainId and baseAsset for tool calls
       let strategyChainId = 1;
@@ -429,44 +397,50 @@ Make a sophisticated trading decision considering ALL factors. Explain your reas
       ];
 
       let decision: Decision & { reasoning?: any };
-      let maxToolIterations = 3; // Allow up to 3 tool call iterations
-      let iteration = 0;
+      
+      // Only use function calling for FULL mode
+      const useFunctionCalling = aiMode === 'FULL';
+      
+      if (useFunctionCalling) {
+        // FULL mode: Use function calling with tool loop
+        let maxToolIterations = 3; // Allow up to 3 tool call iterations
+        let iteration = 0;
 
-      // Handle tool calls in a loop
-      while (iteration < maxToolIterations) {
-        const response = await this.openai.chat.completions.create({
-          model: 'gpt-5.1',
-          messages,
-          tools: iteration === 0 ? tools : undefined, // Only send tools on first call
-          tool_choice: iteration === 0 ? 'auto' : 'none', // Let AI decide when to use tools
-          response_format: {
-            type: 'json_schema',
-            json_schema: {
-              name: 'trading_decision',
-              schema: decisionSchema,
+        // Handle tool calls in a loop
+        while (iteration < maxToolIterations) {
+          const response = await this.openai.chat.completions.create({
+            model,
+            messages,
+            tools: iteration === 0 ? tools : undefined, // Only send tools on first call
+            tool_choice: iteration === 0 ? 'auto' : 'none', // Let AI decide when to use tools
+            response_format: {
+              type: 'json_schema',
+              json_schema: {
+                name: 'trading_decision',
+                schema: decisionSchema,
+              },
             },
-          },
-          temperature: 0.3,
-          reasoning_effort: 'medium',
-        });
+            temperature: 0.3,
+            reasoning_effort: 'medium',
+          });
 
-        const message = response.choices[0]?.message;
-        if (!message) {
-          throw new Error('No response from OpenAI');
-        }
+          const message = response.choices[0]?.message;
+          if (!message) {
+            throw new Error('No response from OpenAI');
+          }
 
-        // Handle tool calls
-        if (message.tool_calls && message.tool_calls.length > 0) {
-          messages.push(message); // Add assistant message with tool calls
+          // Handle tool calls
+          if (message.tool_calls && message.tool_calls.length > 0) {
+            messages.push(message); // Add assistant message with tool calls
 
-          // Execute tool calls
-          for (const toolCall of message.tool_calls) {
-            const functionName = toolCall.function.name;
-            const args = JSON.parse(toolCall.function.arguments);
+            // Execute tool calls
+            for (const toolCall of message.tool_calls) {
+              const functionName = toolCall.function.name;
+              const args = JSON.parse(toolCall.function.arguments);
 
-            let toolResult: any;
-            try {
-              if (functionName === 'getCurrentPrice') {
+              let toolResult: any;
+              try {
+                if (functionName === 'getCurrentPrice') {
                 const symbol = strategyConfig.universe[0] || args.symbol;
                 const price = await priceService.getLivePrice(args.chainId, args.baseAsset, symbol);
                 toolResult = {
@@ -527,36 +501,59 @@ Make a sophisticated trading decision considering ALL factors. Explain your reas
               } else {
                 toolResult = { error: `Unknown function: ${functionName}` };
               }
-            } catch (error: any) {
-              logger.error({ error, functionName }, 'Tool execution failed');
-              toolResult = { error: error.message || 'Tool execution failed' };
+              } catch (error: any) {
+                logger.error({ error, functionName }, 'Tool execution failed');
+                toolResult = { error: error.message || 'Tool execution failed' };
+              }
+
+              // Add tool result to messages
+              messages.push({
+                role: 'tool',
+                tool_call_id: toolCall.id,
+                content: JSON.stringify(toolResult),
+              });
             }
 
-            // Add tool result to messages
-            messages.push({
-              role: 'tool',
-              tool_call_id: toolCall.id,
-              content: JSON.stringify(toolResult),
-            });
+            iteration++;
+            continue; // Continue loop to get final decision
           }
 
-          iteration++;
-          continue; // Continue loop to get final decision
+          // No tool calls - parse the decision
+          const content = message.content;
+          if (!content) {
+            throw new Error('No content in OpenAI response');
+          }
+
+          decision = JSON.parse(content) as Decision & { reasoning?: any };
+          break; // Exit loop with decision
         }
 
-        // No tool calls - parse the decision
-        const content = message.content;
-        if (!content) {
-          throw new Error('No content in OpenAI response');
+        if (!decision) {
+          throw new Error('Failed to get decision after tool calls');
         }
+      } else {
+      // ASSIST mode: Simple call without function calling
+      const response = await this.openai.chat.completions.create({
+        model,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
+        ],
+        response_format: {
+          type: 'json_schema',
+          json_schema: {
+            name: 'trading_decision',
+            schema: decisionSchema,
+          },
+        },
+      });
 
-        decision = JSON.parse(content) as Decision & { reasoning?: any };
-        break; // Exit loop with decision
+      const message = response.choices[0]?.message;
+      if (!message || !message.content) {
+        throw new Error('No response from OpenAI');
       }
 
-      if (!decision) {
-        throw new Error('Failed to get decision after tool calls');
-      }
+      decision = JSON.parse(message.content) as Decision & { reasoning?: any };
 
       // Validate decision structure
       if (!['long', 'short', 'flat'].includes(decision.action)) {
@@ -573,9 +570,6 @@ Make a sophisticated trading decision considering ALL factors. Explain your reas
         throw new Error(`Invalid targetPositionSizePct: ${decision.targetPositionSizePct}`);
       }
 
-      // Adaptive confidence adjustment based on recent performance
-      const adjustedConfidence = this.adjustConfidenceByPerformance(decision.confidence, context.performance);
-
       // Enforce risk limits
       if (context.dailyPnl < 0 && Math.abs(context.dailyPnl) / context.currentEquity >= context.riskLimits.maxDailyLossPct / 100) {
         logger.warn('Daily loss limit exceeded, forcing flat position');
@@ -587,23 +581,58 @@ Make a sophisticated trading decision considering ALL factors. Explain your reas
         };
       }
 
-      // Adjust position size based on market regime and confidence
-      const regimeAdjustment = this.getRegimePositionAdjustment(marketRegime);
-      const adjustedPositionSize = decision.targetPositionSizePct * adjustedConfidence * regimeAdjustment;
-
       // Clamp position size to max
       decision.targetPositionSizePct = Math.min(
-        adjustedPositionSize,
+        decision.targetPositionSizePct,
         context.riskLimits.maxPositionPct
       );
-
-      // Update confidence with adjusted value
-      decision.confidence = adjustedConfidence;
-
-      // Add reasoning to notes if available
-      if (decision.reasoning) {
-        decision.notes = `${decision.notes || ''}\n[Regime: ${decision.reasoning.marketRegime || marketRegime}, Risk: ${decision.reasoning.riskAssessment || 'medium'}]`.trim();
       }
+
+      // Validate decision structure (shared for both modes)
+      if (!decision || !['long', 'short', 'flat'].includes(decision.action)) {
+        throw new Error(`Invalid action: ${decision?.action}`);
+      }
+      if (typeof decision.confidence !== 'number' || decision.confidence < 0 || decision.confidence > 1) {
+        throw new Error(`Invalid confidence: ${decision.confidence}`);
+      }
+      if (
+        typeof decision.targetPositionSizePct !== 'number' ||
+        decision.targetPositionSizePct < 0 ||
+        decision.targetPositionSizePct > 100
+      ) {
+        throw new Error(`Invalid targetPositionSizePct: ${decision.targetPositionSizePct}`);
+      }
+
+      // Adaptive confidence adjustment based on recent performance (only for FULL mode)
+      if (useFunctionCalling) {
+        const adjustedConfidence = this.adjustConfidenceByPerformance(decision.confidence, context.performance);
+        const regimeAdjustment = this.getRegimePositionAdjustment(marketRegime);
+        const adjustedPositionSize = decision.targetPositionSizePct * adjustedConfidence * regimeAdjustment;
+        decision.targetPositionSizePct = Math.min(adjustedPositionSize, context.riskLimits.maxPositionPct);
+        decision.confidence = adjustedConfidence;
+
+        // Add reasoning to notes if available
+        if (decision.reasoning) {
+          decision.notes = `${decision.notes || ''}\n[Regime: ${decision.reasoning.marketRegime || marketRegime}, Risk: ${decision.reasoning.riskAssessment || 'medium'}]`.trim();
+        }
+      }
+
+      // Enforce risk limits (shared for both modes)
+      if (context.dailyPnl < 0 && Math.abs(context.dailyPnl) / context.currentEquity >= context.riskLimits.maxDailyLossPct / 100) {
+        logger.warn('Daily loss limit exceeded, forcing flat position');
+        return {
+          action: 'flat',
+          confidence: 0,
+          targetPositionSizePct: 0,
+          notes: 'Daily loss limit exceeded',
+        };
+      }
+
+      // Clamp position size to max (shared for both modes)
+      decision.targetPositionSizePct = Math.min(
+        decision.targetPositionSizePct,
+        context.riskLimits.maxPositionPct
+      );
 
       return decision;
     } catch (error) {

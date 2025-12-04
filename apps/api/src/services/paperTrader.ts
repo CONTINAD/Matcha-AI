@@ -1,17 +1,15 @@
 import type { Candle, MarketContext, Decision, StrategyConfig, Position, Trade } from '@matcha-ai/shared';
 import { timeframeToMs } from '@matcha-ai/shared';
-import { matchaBrain } from './matchaBrain';
 import { riskManager } from './riskManager';
-import { extractIndicatorsSync } from './features';
 import { dataFeed } from './dataFeed';
 import { predictionTrainer } from './predictionTrainer';
-import { advancedTrainer } from './advancedTrainer';
 import { PrismaClient } from '@prisma/client';
 import { logger } from '../config/logger';
 import { calculatePnL, calculateMaxDrawdown } from '@matcha-ai/shared';
 import { wsService } from './websocket';
 import { checkStopLossTakeProfit, TrailingStopTracker } from './stopLossTakeProfit';
 import { solanaLogger } from './solanaLogger';
+import { decisionEngine } from './decisionEngine';
 
 const prisma = new PrismaClient();
 type TrackedPosition = Position & { tradeId?: string; entryFee?: number };
@@ -555,29 +553,30 @@ export class PaperTrader {
             });
           }
 
-          const context: MarketContext = {
-            recentCandles: recentCandles.length > 0 ? recentCandles.slice(-20) : [latestCandle],
-            indicators,
-            openPositions: Array.from(positions.values()),
-            performance: {
-              realizedPnl,
-              maxDrawdown: 0, // Simplified
-              winRate,
-            },
-            riskLimits: config.riskLimits,
-            currentEquity: equity,
+          // Build context using unified decision engine
+          const candlesForContext = recentCandles.length > 0 ? recentCandles : [latestCandle];
+          const context = decisionEngine.buildContext(
+            candlesForContext,
+            Array.from(positions.values()),
+            recentTrades as Trade[],
+            equity,
             dailyPnl,
-          };
+            config.riskLimits,
+            equityHistory,
+            recentReturns
+          );
+          
+          // Update context with computed indicators
+          context.indicators = indicators;
 
-          // Risk guard before invoking AI
+          // Risk guard before decision
           const hitDailyLimit = riskManager.isDailyLossLimitExceeded(
             dailyPnl,
             equity,
             config.riskLimits.maxDailyLossPct
           );
 
-          // Get AI decision with training integration and throttling
-          // LLM is throttled to avoid excessive API calls - use cached decision if recent
+          // Get decision using unified decision engine
           let decision: Decision;
           let predictionId: string | null = null;
           let lastPredictionId: string | null = null; // Track last prediction for trade linking
@@ -622,175 +621,34 @@ export class PaperTrader {
               }
               logger.debug({ strategyId }, 'Using cached decision (LLM throttled)');
             } else {
-              // Call LLM (throttled to max once per MIN_DECISION_INTERVAL_MS)
+              // Use unified decision engine
               try {
-                // Get historical decisions for learning
-                const historicalDecisions = await predictionTrainer.getHistoricalDecisions(strategyId, 30);
-                
-                // Use AI decision (this trains the model) - with timeout
-                const metrics = this.tradingMetrics.get(strategyId);
-                if (metrics) {
-                  metrics.openaiCalls++;
-                  metrics.totalDecisions++;
-                }
-                logger.info({ strategyId, symbol, candles: recentCandles.length, indicators: Object.keys(indicators).length }, '🤖 Calling OpenAI API for trading decision');
-                
-                const decisionPromise = matchaBrain.getDecision(context, config, historicalDecisions, strategyId);
-                const timeoutPromise = new Promise<Decision>((_, reject) => 
-                  setTimeout(() => reject(new Error('LLM timeout')), 10000) // 10s timeout
-                );
-                
-                try {
-                  decision = await Promise.race([decisionPromise, timeoutPromise]);
-                  
-                  if (!decision) {
-                    throw new Error('LLM returned null/undefined decision');
-                  }
-                  
-                  logger.info({ 
-                    strategyId, 
-                    symbol, 
-                    action: decision.action, 
-                    confidence: decision.confidence,
-                    targetSize: decision.targetPositionSizePct 
-                  }, '✅ Got decision from OpenAI');
-                  
-                  if (metrics) {
-                    metrics.lastDecisionTime = now;
-                    metrics.lastDecision = decision;
-                    metrics.lastDecisionReason = 'openai';
-                  }
-                  
-                  // Improve decision based on past predictions
-                  if (historicalDecisions.length > 5) {
-                    decision = await predictionTrainer.improveDecision(strategyId, decision, context);
-                  }
-                } catch (error: any) {
-                  logger.error({ 
-                    error: error.message, 
-                    strategyId, 
-                    symbol,
-                    stack: error.stack 
-                  }, '❌ OpenAI decision failed, using fast decision fallback');
-                  
-                  // Fallback to fast decision
-                  const fastDecision = this.getFastDecision(context, indicators);
-                  decision = fastDecision;
-                  
-                  if (metrics) {
-                    metrics.fastDecisions++;
-                    metrics.lastDecisionTime = now;
-                    metrics.lastDecision = decision;
-                    metrics.lastDecisionReason = 'openai_error_fallback';
-                  }
-                }
-                
-            // For paper trading, use REAL AI decisions - don't force fake trades
-            // Only use fallback if AI completely fails
-            if (strategy.mode === 'PAPER') {
-              const metrics = this.tradingMetrics.get(strategyId);
-              
-              // If we have a valid AI decision, use it (don't override)
-              if (decision && decision.action !== 'flat' && decision.confidence >= 0.3) {
-                // Ensure target size is set for valid AI decisions
-                if (!decision.targetPositionSizePct || decision.targetPositionSizePct <= 0) {
-                  decision.targetPositionSizePct = Math.min(5, config.riskLimits.maxPositionPct || 5);
-                }
-                if (metrics) {
-                  metrics.lastDecision = decision;
-                  metrics.lastDecisionReason = 'openai_valid';
-                }
-                logger.info({ 
-                  strategyId, 
-                  symbol, 
-                  action: decision.action, 
-                  confidence: decision.confidence,
-                  targetSize: decision.targetPositionSizePct,
-                  reason: 'Using real AI decision'
-                }, '✅ Using AI decision for paper trading');
-              } else if (decision && decision.action === 'flat') {
-                // AI says flat - respect it, but try fast decision as fallback
-                const fastDecision = this.getFastDecision(context, indicators);
-                if (fastDecision.action !== 'flat' && fastDecision.confidence >= 0.4) {
-                  decision = fastDecision;
-                  decision.targetPositionSizePct = Math.min(5, config.riskLimits.maxPositionPct || 5);
-                  if (metrics) {
-                    metrics.fastDecisions++;
-                    metrics.lastDecisionReason = 'fast_fallback_ai_flat';
-                    metrics.lastDecision = decision;
-                  }
-                  logger.info({ 
-                    strategyId, 
-                    symbol, 
-                    action: decision.action, 
-                    confidence: decision.confidence,
-                    reason: 'AI said flat, using fast decision fallback'
-                  }, 'Using fast decision (AI was flat)');
-                } else {
-                  // Both AI and fast say flat - stay flat (don't force fake trades)
-                  if (metrics) {
-                    metrics.lastDecision = decision;
-                    metrics.lastDecisionReason = 'both_flat';
-                  }
-                  logger.info({ strategyId, symbol }, 'Both AI and fast decision are flat - staying flat');
-                }
-              } else {
-                // AI decision failed or invalid - use fast decision
-                const fastDecision = this.getFastDecision(context, indicators);
-                if (fastDecision.action !== 'flat' && fastDecision.confidence >= 0.4) {
-                  decision = fastDecision;
-                  decision.targetPositionSizePct = Math.min(5, config.riskLimits.maxPositionPct || 5);
-                  if (metrics) {
-                    metrics.fastDecisions++;
-                    metrics.lastDecisionReason = 'fast_fallback_ai_failed';
-                    metrics.lastDecision = decision;
-                  }
-                  logger.info({ 
-                    strategyId, 
-                    symbol, 
-                    action: decision.action, 
-                    confidence: decision.confidence,
-                    reason: 'AI failed, using fast decision'
-                  }, 'Using fast decision (AI failed)');
-                } else {
-                  // Everything failed - stay flat (NO FAKE TRADES)
-                  decision = {
-                    action: 'flat' as const,
-                    confidence: 0,
-                    targetPositionSizePct: 0,
-                    notes: 'All decision methods failed or returned flat',
-                  };
-                  if (metrics) {
-                    metrics.lastDecision = decision;
-                    metrics.lastDecisionReason = 'all_failed_flat';
-                  }
-                  logger.warn({ strategyId, symbol }, 'All decision methods failed - staying flat (no fake trades)');
-                }
-              }
-            } else {
-              // For live trading, use normal adaptive threshold
-              const baseThreshold = config.thresholds?.minConfidence || 0.6;
-              const adaptiveThreshold = await advancedTrainer.adjustConfidenceThreshold(
-                strategyId,
-                baseThreshold
-              );
+                // Get historical decisions for AI (only if not OFF mode)
+                const aiConfig = config.ai || { mode: 'ASSIST' };
+                const historicalDecisions = 
+                  aiConfig.mode !== 'OFF'
+                    ? await predictionTrainer.getHistoricalDecisions(strategyId, 30)
+                    : undefined;
 
-              if (decision.confidence < adaptiveThreshold) {
-                // Fallback to fast decision
-                const fastDecision = this.getFastDecision(context, indicators);
+                // Use unified decision engine
+                decision = await decisionEngine.decide(context, config, {
+                  aiMode: aiConfig.mode,
+                  strategyId,
+                  historicalDecisions,
+                });
+
                 const metrics = this.tradingMetrics.get(strategyId);
                 if (metrics) {
-                  metrics.fastDecisions++;
-                  metrics.lastDecisionReason = 'fast_fallback';
-                }
-                if (fastDecision.confidence >= 0.5) {
-                  decision = fastDecision;
-                }
-                if (metrics) {
+                  metrics.totalDecisions++;
+                  metrics.lastDecisionTime = now;
                   metrics.lastDecision = decision;
+                  metrics.lastDecisionReason = aiConfig.mode === 'OFF' ? 'fast' : 'unified_engine';
+                  if (aiConfig.mode !== 'OFF') {
+                    metrics.openaiCalls++;
+                  } else {
+                    metrics.fastDecisions++;
+                  }
                 }
-              }
-            }
 
                 // Cache the decision
                 const contextHash = this.hashContext(context, indicators);
@@ -819,16 +677,17 @@ export class PaperTrader {
                 } catch (error) {
                   logger.warn({ error }, 'Failed to store prediction');
                 }
-              } catch (error) {
-                logger.warn({ error, strategyId, symbol }, 'AI decision failed or timed out, using fast decision');
+              } catch (error: any) {
+                logger.warn({ error: error.message, strategyId, symbol }, 'Decision engine failed, using fast fallback');
                 const metrics = this.tradingMetrics.get(strategyId);
                 if (metrics) {
                   metrics.fastDecisions++;
                   metrics.totalDecisions++;
-                  metrics.lastDecisionTime = now;
-                  metrics.lastDecisionReason = 'openai_error_fallback';
+                  metrics.lastDecisionTime = Date.now();
+                  metrics.lastDecisionReason = 'engine_error_fallback';
                 }
-                decision = this.getFastDecision(context, indicators);
+                // Fallback to fast decision only
+                decision = decisionEngine.getFastDecision(context, indicators);
                 if (metrics) {
                   metrics.lastDecision = decision;
                 }
@@ -1668,166 +1527,13 @@ export class PaperTrader {
   /**
    * Fast rule-based decision (same as backtester for consistency)
    */
+  /**
+   * @deprecated Use decisionEngine.getFastDecision() instead
+   * This method is kept temporarily for backward compatibility but will be removed.
+   */
   private getFastDecision(context: MarketContext, indicators: any): Decision {
-    const rsi = indicators?.rsi;
-    const ema20 = indicators?.ema20;
-    const ema50 = indicators?.ema50;
-    const sma20 = indicators?.sma20;
-    const sma50 = indicators?.sma50;
-    const macd = indicators?.macd;
-    const macdSignal = indicators?.macdSignal;
-    const macdHistogram = indicators?.macdHistogram;
-    const bbUpper = indicators?.bollingerUpper || indicators?.bbUpper;
-    const bbLower = indicators?.bollingerLower || indicators?.bbLower;
-    const bbMiddle = indicators?.bollingerMiddle || indicators?.bbMiddle;
-    const adx = indicators?.adx;
-    const price = context.recentCandles[context.recentCandles.length - 1]?.close || 0;
-    const candles = context.recentCandles;
-    
-    let action: 'long' | 'short' | 'flat' = 'flat';
-    let confidence = 0.3;
-    let signalStrength = 0;
-    
-    const shortMA = ema20 || sma20;
-    const longMA = ema50 || sma50;
-    
-    if (price > 0 && shortMA && longMA) {
-      const bullishTrend = shortMA > longMA;
-      const bearishTrend = shortMA < longMA;
-      const trendStrength = Math.abs((shortMA - longMA) / longMA);
-      
-      if (bullishTrend && trendStrength > 0.005) {
-        signalStrength += 3;
-      } else if (bearishTrend && trendStrength > 0.005) {
-        signalStrength -= 3;
-      }
-      
-      if (rsi) {
-        if (bullishTrend && rsi > 50 && rsi < 70) {
-          signalStrength += 2.5; // Increased from 2
-        } else if (bullishTrend && rsi > 40 && rsi < 50) {
-          signalStrength += 1;
-        } else if (bearishTrend && rsi < 50 && rsi > 30) {
-          signalStrength -= 2.5; // Increased from 2
-        } else if (bearishTrend && rsi < 60 && rsi > 50) {
-          signalStrength -= 1;
-        }
-        if (rsi > 75) signalStrength -= 2;
-        if (rsi < 25) signalStrength += 2;
-      }
-      
-      if (macd && macdSignal && macdHistogram) {
-        if (macd > macdSignal && macdHistogram > 0) {
-          signalStrength += 2;
-        } else if (macd < macdSignal && macdHistogram < 0) {
-          signalStrength -= 2;
-        }
-      }
-      
-      if (bbUpper && bbLower && bbMiddle) {
-        const bbPosition = (price - bbLower) / (bbUpper - bbLower);
-        if (bullishTrend && bbPosition < 0.3 && price < bbMiddle) {
-          signalStrength += 1.5;
-        } else if (bearishTrend && bbPosition > 0.7 && price > bbMiddle) {
-          signalStrength -= 1.5;
-        }
-      }
-      
-      if (adx) {
-        if (adx > 25) {
-          signalStrength *= 1.2;
-        } else if (adx < 20) {
-          signalStrength *= 0.7;
-        }
-      }
-      
-      if (candles.length >= 3) {
-        const recent = candles.slice(-3);
-        const momentum = (recent[2].close - recent[0].close) / recent[0].close;
-        if (momentum > 0.015 && bullishTrend) { // Lowered from 0.02 to 0.015
-          signalStrength += 1;
-        } else if (momentum < -0.015 && bearishTrend) { // Lowered from -0.02 to -0.015
-          signalStrength -= 1;
-        }
-      }
-      
-      // For paper trading, be much more aggressive - lower thresholds
-      const minSignalStrength = 2; // Lowered from 3 to 2 for more trades
-      if (signalStrength >= minSignalStrength) {
-        action = 'long';
-        confidence = Math.min(0.85, 0.5 + (signalStrength - minSignalStrength) * 0.1);
-      } else if (signalStrength <= -minSignalStrength) {
-        action = 'short';
-        confidence = Math.min(0.85, 0.5 + (Math.abs(signalStrength) - minSignalStrength) * 0.1);
-      } else if (signalStrength >= 1) {
-        // Even weaker signals - still take long
-        action = 'long';
-        confidence = 0.45;
-      } else if (signalStrength <= -1) {
-        // Even weaker signals - still take short
-        action = 'short';
-        confidence = 0.45;
-      } else {
-        action = 'flat';
-        confidence = 0.2;
-      }
-      
-      const totalTrades = context.performance.totalTrades || 0;
-      if (context.performance.winRate > 0.55 && totalTrades > 10) {
-        confidence = Math.min(0.9, confidence * 1.1);
-      } else if (context.performance.winRate < 0.45 && totalTrades > 10) {
-        confidence = Math.max(0.3, confidence * 0.9);
-      }
-    } else if (price > 0 && candles.length >= 3) {
-      // Improved fallback: work with 3-5 candles using simpler momentum
-      const recent = candles.slice(-Math.min(5, candles.length));
-      const shortMomentum = recent.length >= 3 
-        ? (recent[recent.length - 1].close - recent[recent.length - 3].close) / recent[recent.length - 3].close
-        : 0;
-      const longMomentum = recent.length >= 5
-        ? (recent[recent.length - 1].close - recent[0].close) / recent[0].close
-        : shortMomentum; // Use short momentum if we don't have 5 candles
-      
-      // Lower thresholds for fallback mode
-      if (shortMomentum > 0.01 && longMomentum > 0.005) { // Lowered thresholds
-        action = 'long';
-        confidence = 0.45; // Slightly lower confidence for fallback
-      } else if (shortMomentum < -0.01 && longMomentum < -0.005) { // Lowered thresholds
-        action = 'short';
-        confidence = 0.45;
-      }
-      
-      // Simple moving average crossover if we have enough candles
-      if (candles.length >= 5 && !shortMA && !longMA) {
-        const sma3 = candles.slice(-3).reduce((sum, c) => sum + c.close, 0) / 3;
-        const sma5 = candles.slice(-5).reduce((sum, c) => sum + c.close, 0) / 5;
-        if (sma3 > sma5 && sma3 > sma5 * 1.002) { // 0.2% crossover threshold
-          signalStrength += 1;
-          if (action === 'flat') {
-            action = 'long';
-            confidence = 0.4;
-          }
-        } else if (sma3 < sma5 && sma3 < sma5 * 0.998) {
-          signalStrength -= 1;
-          if (action === 'flat') {
-            action = 'short';
-            confidence = 0.4;
-          }
-        }
-      }
-    }
-    
-    if (action !== 'flat' && confidence < 0.35) { // Lowered from 0.4 to 0.35
-      action = 'flat';
-      confidence = 0.2;
-    }
-    
-    return {
-      action,
-      confidence,
-      targetPositionSizePct: confidence * (context.riskLimits?.maxPositionPct || 10),
-      notes: `Fast mode: signal ${signalStrength.toFixed(1)}`,
-    };
+    // Delegate to unified decision engine
+    return decisionEngine.getFastDecision(context, indicators);
   }
 
   /**

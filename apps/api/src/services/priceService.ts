@@ -749,7 +749,7 @@ export class PriceService {
     // Map results back to original requests with error handling
     return requests.map((req, index) => {
       const result = results[index];
-      if (result instanceof Error) {
+      if (result && typeof result === 'object' && 'message' in result) {
         return {
           chainId: req.chainId,
           sellToken: req.sellToken,
