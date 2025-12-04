@@ -5,7 +5,7 @@ import { useState } from 'react';
 export interface FilterOptions {
   status: 'all' | 'ACTIVE' | 'PAUSED';
   mode: 'all' | 'PAPER' | 'LIVE' | 'SIMULATION' | 'BACKTEST';
-  chainId: 'all' | '1' | '137' | '42161' | '101';
+  chainId: 'all' | '1' | '137' | '42161' | 'evm-only'; // 'evm-only' filters out Solana (101)
   timeframe: 'all' | '1m' | '5m' | '15m' | '1h' | '4h' | '1d';
   sortBy: 'name' | 'created' | 'trades' | 'pnl' | 'winRate';
   sortOrder: 'asc' | 'desc';
@@ -29,7 +29,7 @@ export function StrategyFilters({ filters, onFiltersChange, totalStrategies }: S
     onFiltersChange({
       status: 'all',
       mode: 'all',
-      chainId: 'all',
+      chainId: 'evm-only', // Default to EVM only (exclude Solana)
       timeframe: 'all',
       sortBy: 'created',
       sortOrder: 'desc',
@@ -124,11 +124,11 @@ export function StrategyFilters({ filters, onFiltersChange, totalStrategies }: S
               onChange={(e) => updateFilter('chainId', e.target.value)}
               className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
             >
-              <option value="all">All</option>
-              <option value="1">🔷 Ethereum</option>
-              <option value="137">🟣 Polygon</option>
-              <option value="42161">🔵 Arbitrum</option>
-              <option value="101">🌐 Solana</option>
+              <option value="evm-only">EVM Chains Only</option>
+              <option value="all">All Chains</option>
+              <option value="1">⟠ Ethereum</option>
+              <option value="137">⬟ Polygon</option>
+              <option value="42161">🔷 Arbitrum</option>
             </select>
           </div>
 

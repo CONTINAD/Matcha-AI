@@ -208,7 +208,6 @@ Return ONLY a valid JSON object matching this structure:
             content: prompt,
           },
         ],
-        temperature: 0.7,
         max_tokens: 2000,
         reasoning_effort: 'medium', // Adaptive reasoning for strategy optimization
       });

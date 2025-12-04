@@ -40,7 +40,7 @@ export class PredictionTrainer {
           dailyPnl: context.dailyPnl,
         }),
         indicators: JSON.stringify(indicators),
-        reasoning: decision.notes || decision.reasoning?.keyFactors?.join(', ') || null,
+        reasoning: decision.notes || (decision as any).reasoning?.keyFactors?.join(', ') || null,
       },
     });
 
@@ -311,6 +311,142 @@ export class PredictionTrainer {
       targetPositionSizePct: adjustedConfidence * (context.riskLimits?.maxPositionPct || 10),
       notes: `${decision.notes || ''} [Learned: ${insights.accuracy > 0.5 ? 'High accuracy' : 'Improving'}]`,
     };
+  }
+
+  /**
+   * Auto-adjust strategy confidence thresholds based on performance
+   * Called after every 10 trades to continuously improve
+   */
+  async autoAdjustStrategy(strategyId: string): Promise<{
+    oldThreshold: number;
+    newThreshold: number;
+    accuracy: number;
+    adjustments: string[];
+  }> {
+    const insights = await this.getLearningInsights(strategyId, 50);
+    const adjustments: string[] = [];
+    
+    // Get current strategy config to find confidence threshold
+    const strategy = await prisma.strategy.findUnique({
+      where: { id: strategyId },
+    });
+    
+    if (!strategy) {
+      throw new Error(`Strategy not found: ${strategyId}`);
+    }
+    
+    const config = JSON.parse(strategy.configJson || '{}');
+    const currentThreshold = config.thresholds?.minConfidence || 0.6;
+    let newThreshold = currentThreshold;
+    
+    // Adjust threshold based on accuracy
+    if (insights.accuracy < 0.5) {
+      // Low accuracy - increase confidence threshold (be more conservative)
+      newThreshold = Math.min(0.9, currentThreshold + 0.1);
+      adjustments.push(`Increased confidence threshold from ${(currentThreshold * 100).toFixed(0)}% to ${(newThreshold * 100).toFixed(0)}% (low accuracy: ${(insights.accuracy * 100).toFixed(1)}%)`);
+    } else if (insights.accuracy > 0.65) {
+      // High accuracy - decrease threshold (be more aggressive)
+      newThreshold = Math.max(0.5, currentThreshold - 0.05);
+      adjustments.push(`Decreased confidence threshold from ${(currentThreshold * 100).toFixed(0)}% to ${(newThreshold * 100).toFixed(0)}% (high accuracy: ${(insights.accuracy * 100).toFixed(1)}%)`);
+    }
+    
+    // Favor winning patterns
+    if (insights.correctPatterns.length > 0) {
+      adjustments.push(`Favoring ${insights.correctPatterns.length} winning patterns`);
+      // Store winning patterns in strategy config for future reference
+      config.learnedPatterns = {
+        winning: insights.correctPatterns,
+        losing: insights.incorrectPatterns,
+        lastUpdated: new Date().toISOString(),
+      };
+    }
+    
+    // Update strategy config if threshold changed
+    if (newThreshold !== currentThreshold) {
+      config.thresholds = config.thresholds || {};
+      config.thresholds.minConfidence = newThreshold;
+      
+      await prisma.strategy.update({
+        where: { id: strategyId },
+        data: {
+          configJson: JSON.stringify(config),
+        },
+      });
+      
+      logger.info(
+        { strategyId, oldThreshold: currentThreshold, newThreshold, accuracy: insights.accuracy },
+        'Auto-adjusted confidence threshold'
+      );
+    }
+    
+    return {
+      oldThreshold: currentThreshold,
+      newThreshold,
+      accuracy: insights.accuracy,
+      adjustments,
+    };
+  }
+
+  /**
+   * Increase confidence threshold (make more conservative)
+   */
+  async increaseConfidenceThreshold(strategyId: string, increment: number = 0.1): Promise<number> {
+    const strategy = await prisma.strategy.findUnique({ where: { id: strategyId } });
+    if (!strategy) throw new Error(`Strategy not found: ${strategyId}`);
+    
+    const config = JSON.parse(strategy.configJson || '{}');
+    config.thresholds = config.thresholds || {};
+    const current = config.thresholds.minConfidence || 0.6;
+    const newThreshold = Math.min(0.9, current + increment);
+    
+    config.thresholds.minConfidence = newThreshold;
+    await prisma.strategy.update({
+      where: { id: strategyId },
+      data: { configJson: JSON.stringify(config) },
+    });
+    
+    return newThreshold;
+  }
+
+  /**
+   * Decrease confidence threshold (make more aggressive)
+   */
+  async decreaseConfidenceThreshold(strategyId: string, decrement: number = 0.05): Promise<number> {
+    const strategy = await prisma.strategy.findUnique({ where: { id: strategyId } });
+    if (!strategy) throw new Error(`Strategy not found: ${strategyId}`);
+    
+    const config = JSON.parse(strategy.configJson || '{}');
+    config.thresholds = config.thresholds || {};
+    const current = config.thresholds.minConfidence || 0.6;
+    const newThreshold = Math.max(0.5, current - decrement);
+    
+    config.thresholds.minConfidence = newThreshold;
+    await prisma.strategy.update({
+      where: { id: strategyId },
+      data: { configJson: JSON.stringify(config) },
+    });
+    
+    return newThreshold;
+  }
+
+  /**
+   * Boost confidence for specific patterns that have been winning
+   */
+  async boostPatternConfidence(strategyId: string, pattern: string): Promise<void> {
+    // Store pattern in strategy config for future reference
+    const strategy = await prisma.strategy.findUnique({ where: { id: strategyId } });
+    if (!strategy) return;
+    
+    const config = JSON.parse(strategy.configJson || '{}');
+    config.learnedPatterns = config.learnedPatterns || { winning: [], losing: [] };
+    
+    if (!config.learnedPatterns.winning.includes(pattern)) {
+      config.learnedPatterns.winning.push(pattern);
+      await prisma.strategy.update({
+        where: { id: strategyId },
+        data: { configJson: JSON.stringify(config) },
+      });
+    }
   }
 }
 

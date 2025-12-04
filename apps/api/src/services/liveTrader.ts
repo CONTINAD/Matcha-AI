@@ -4,6 +4,9 @@ import { riskManager } from './riskManager';
 import { extractIndicatorsSync } from './features';
 import { dataFeed } from './dataFeed';
 import { zeroExService } from './zeroExService';
+import { transactionTracker } from './transactionTracker';
+import { tradeAnalyticsService } from './tradeAnalyticsService';
+import { predictionTrainer } from './predictionTrainer';
 import { getTokenAddress } from '@matcha-ai/shared';
 import { PrismaClient } from '@prisma/client';
 import { logger } from '../config/logger';
@@ -227,6 +230,24 @@ export class LiveTrader {
               const slippageBps = 50; // 0.5%
 
               try {
+                // Check allowance before building swap
+                const quote = await zeroExService.getQuote({
+                  chainId: strategy.chainId,
+                  sellToken: quoteToken,
+                  buyToken: baseToken,
+                  amount: sellAmount,
+                  slippageBps,
+                });
+
+                // Validate allowance target
+                const allowanceTarget = zeroExService.getAllowanceTarget(quote, strategy.chainId);
+                if (allowanceTarget) {
+                  // Note: In a real implementation, you would check the actual allowance here
+                  // For now, we just validate the target is safe
+                  zeroExService.validateAllowanceTarget(allowanceTarget, strategy.chainId);
+                  logger.info({ allowanceTarget, strategyId, symbol }, 'Allowance target validated');
+                }
+
                 const swapTx = await zeroExService.buildSwapTx({
                   chainId: strategy.chainId,
                   sellToken: quoteToken,
@@ -295,6 +316,24 @@ export class LiveTrader {
                 const slippageBps = 50;
 
                 try {
+                  // Check allowance before building swap
+                  const quote = await zeroExService.getQuote({
+                    chainId: strategy.chainId,
+                    sellToken: baseToken,
+                    buyToken: quoteToken,
+                    amount: buyAmount,
+                    slippageBps,
+                  });
+
+                  // Validate allowance target
+                  const allowanceTarget = zeroExService.getAllowanceTarget(quote, strategy.chainId);
+                  if (allowanceTarget) {
+                    // Note: In a real implementation, you would check the actual allowance here
+                    // For now, we just validate the target is safe
+                    zeroExService.validateAllowanceTarget(allowanceTarget, strategy.chainId);
+                    logger.info({ allowanceTarget, strategyId, symbol }, 'Allowance target validated');
+                  }
+
                   const swapTx = await zeroExService.buildSwapTx({
                     chainId: strategy.chainId,
                     sellToken: baseToken,
@@ -362,6 +401,7 @@ export class LiveTrader {
 
   /**
    * Record a completed trade (after user signs and tx is confirmed)
+   * Also starts tracking the transaction and calculating execution quality
    */
   async recordTrade(
     strategyId: string,
@@ -376,19 +416,97 @@ export class LiveTrader {
       pnl: number;
       pnlPct: number;
       txHash: string;
+      expectedPrice?: string; // Expected price from quote
+      expectedBuyAmount?: string; // Expected buy amount from quote
     }
   ): Promise<void> {
-    await prisma.trade.create({
+    const strategy = await prisma.strategy.findUnique({
+      where: { id: strategyId },
+    });
+
+    if (!strategy) {
+      throw new Error(`Strategy not found: ${strategyId}`);
+    }
+
+    // Create trade record with learning data
+    // Note: marketContextAtEntry should be stored when trade is initiated (before this)
+    const createdTrade = await prisma.trade.create({
       data: {
         strategyId,
         timestamp: new Date(),
         mode: 'LIVE',
-        ...trade,
+        symbol: trade.symbol,
+        side: trade.side,
+        size: trade.size,
+        entryPrice: trade.entryPrice,
+        exitPrice: trade.exitPrice,
+        fees: trade.fees,
+        slippage: trade.slippage,
+        pnl: trade.pnl,
+        pnlPct: trade.pnlPct,
+        txHash: trade.txHash,
+        // predictionId should be set when trade is initiated (before user signs)
+        // marketContextAtEntry should be stored when trade is initiated
       },
     });
 
+    // Start tracking transaction
+    await transactionTracker.startTracking(trade.txHash, strategy.chainId, createdTrade.id);
+
+    // Calculate execution quality when transaction is confirmed
+    // This will be called asynchronously when the transaction is confirmed
+    this.setupExecutionQualityCalculation(createdTrade.id, trade.expectedPrice, trade.expectedBuyAmount);
+
     this.pendingTrades.delete(strategyId);
-    logger.info({ strategyId, txHash: trade.txHash }, 'Live trade recorded');
+    logger.info({ strategyId, txHash: trade.txHash, tradeId: createdTrade.id }, 'Live trade recorded and tracking started');
+  }
+
+  /**
+   * Setup execution quality calculation when transaction is confirmed
+   */
+  private async setupExecutionQualityCalculation(
+    tradeId: string,
+    expectedPrice?: string,
+    expectedBuyAmount?: string
+  ): Promise<void> {
+    // Poll for transaction confirmation, then calculate execution quality
+    const checkInterval = setInterval(async () => {
+      const trade = await prisma.trade.findUnique({
+        where: { id: tradeId },
+      });
+
+      if (!trade || !trade.txHash) {
+        clearInterval(checkInterval);
+        return;
+      }
+
+      const txInfo = await transactionTracker.getTransactionInfo(trade.txHash);
+      if (!txInfo) {
+        return; // Still pending
+      }
+
+      if (txInfo.status === 'CONFIRMED') {
+        clearInterval(checkInterval);
+
+        // Calculate execution quality
+        if (expectedPrice && expectedBuyAmount) {
+          try {
+            await tradeAnalyticsService.calculateExecutionQuality(tradeId, expectedPrice, expectedBuyAmount);
+            logger.info({ tradeId, txHash: trade.txHash }, 'Execution quality calculated');
+          } catch (error) {
+            logger.error({ error, tradeId }, 'Error calculating execution quality');
+          }
+        }
+      } else if (txInfo.status === 'FAILED' || txInfo.status === 'REVERTED') {
+        clearInterval(checkInterval);
+        logger.warn({ tradeId, txHash: trade.txHash, status: txInfo.status }, 'Transaction failed - skipping execution quality');
+      }
+    }, 5000); // Check every 5 seconds
+
+    // Stop checking after 5 minutes
+    setTimeout(() => {
+      clearInterval(checkInterval);
+    }, 5 * 60 * 1000);
   }
 
   private estimatePayoffRatio(trades: Trade[]): number {

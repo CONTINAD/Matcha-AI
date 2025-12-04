@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import Link from 'next/link';
 import axios from 'axios';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
@@ -72,7 +73,7 @@ export function SystemStatus() {
   }
 
   return (
-    <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4 mb-6">
+    <div className="bg-white dark:bg-gray-800 rounded-xl shadow-lg border border-gray-200 dark:border-gray-700 p-6 mb-6">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
           <div className={`w-3 h-3 rounded-full ${
@@ -87,19 +88,28 @@ export function SystemStatus() {
             </div>
           </div>
         </div>
-        <div className="flex items-center gap-4 text-xs text-gray-500 dark:text-gray-400">
-          <div className="text-right">
-            <div className="font-semibold text-gray-900 dark:text-white">{status.activeStrategies}</div>
-            <div>Active</div>
+        <div className="flex items-center gap-6">
+          <div className="flex items-center gap-4 text-xs text-gray-500 dark:text-gray-400">
+            <div className="text-right">
+              <div className="font-semibold text-gray-900 dark:text-white">{status.activeStrategies}</div>
+              <div>Active</div>
+            </div>
+            <div className="text-right">
+              <div className="font-semibold text-gray-900 dark:text-white">{status.strategies}</div>
+              <div>Total</div>
+            </div>
+            <div className="text-right">
+              <div className="font-semibold text-gray-900 dark:text-white">{status.totalTrades}</div>
+              <div>Trades</div>
+            </div>
           </div>
-          <div className="text-right">
-            <div className="font-semibold text-gray-900 dark:text-white">{status.strategies}</div>
-            <div>Total</div>
-          </div>
-          <div className="text-right">
-            <div className="font-semibold text-gray-900 dark:text-white">{status.totalTrades}</div>
-            <div>Trades</div>
-          </div>
+          <Link
+            href="/testing"
+            className="px-3 py-1.5 bg-purple-600 text-white rounded-md hover:bg-purple-700 transition-colors text-xs font-semibold"
+            title="Extended Testing Dashboard"
+          >
+            Testing →
+          </Link>
         </div>
       </div>
     </div>

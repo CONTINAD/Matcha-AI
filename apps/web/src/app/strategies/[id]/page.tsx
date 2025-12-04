@@ -10,6 +10,9 @@ import { TradeDistribution } from '../../../components/charts/TradeDistribution'
 import { useWebSocket } from '../../../hooks/useWebSocket';
 import { ToastContainer } from '../../../components/Toast';
 import { WalletConnect } from '../../../components/WalletConnect';
+import { ProfitabilityProgress } from '../../../components/ProfitabilityProgress';
+import { SolanaWalletActivate } from '../../../components/SolanaWalletActivate';
+import { TradingStatus } from '../../../components/TradingStatus';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
 const WS_URL = process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:4001';
@@ -22,6 +25,7 @@ interface Strategy {
   status: string;
   baseAsset: string;
   timeframe: string;
+  chainId?: number;
 }
 
 interface PerformanceSnapshot {
@@ -68,6 +72,7 @@ export default function StrategyDetail() {
   const [trainingLoading, setTrainingLoading] = useState(false);
   const [tradeFilter, setTradeFilter] = useState<'all' | 'BUY' | 'SELL' | 'profitable' | 'loss'>('all');
   const [searchSymbol, setSearchSymbol] = useState('');
+  const [checkingProfitability, setCheckingProfitability] = useState(false);
   
   // WebSocket for real-time updates
   const { isConnected, lastMessage } = useWebSocket(WS_URL);
@@ -99,7 +104,12 @@ export default function StrategyDetail() {
 
   const fetchTrades = async () => {
     try {
-      const response = await axios.get<Trade[]>(`${API_URL}/strategies/${strategyId}/trades`);
+      // Filter trades by strategy mode - PAPER strategies should only show PAPER trades
+      const mode = strategy?.mode === 'PAPER' ? 'PAPER' : strategy?.mode === 'LIVE' ? 'LIVE' : undefined;
+      const url = mode 
+        ? `${API_URL}/strategies/${strategyId}/trades?mode=${mode}`
+        : `${API_URL}/strategies/${strategyId}/trades`;
+      const response = await axios.get<Trade[]>(url);
       setTrades(response.data || []);
     } catch (err: any) {
       setError(err?.response?.data?.error || 'Failed to load trades');
@@ -122,7 +132,6 @@ export default function StrategyDetail() {
   useEffect(() => {
     fetchStrategy();
     fetchPerformance();
-    fetchTrades();
     fetchTrainingMetrics();
     
     // Subscribe to WebSocket updates for this strategy
@@ -133,6 +142,13 @@ export default function StrategyDetail() {
       });
     }
   }, [strategyId, isConnected]);
+
+  // Fetch trades after strategy is loaded (so we know the mode)
+  useEffect(() => {
+    if (strategy) {
+      fetchTrades();
+    }
+  }, [strategy, strategyId]);
   
   // Handle WebSocket messages
   useEffect(() => {
@@ -188,13 +204,18 @@ export default function StrategyDetail() {
   const handleBacktest = async () => {
     try {
       setError(null);
+      setPerfLoading(true);
       const response = await axios.post(`${API_URL}/strategies/${strategyId}/backtest`);
       alert(`Backtest completed! Total return: ${response.data.totalReturnPct.toFixed(2)}%`);
       fetchPerformance();
       fetchTrades();
-    } catch (err) {
-      console.error('Error running backtest:', err);
-      setError('Failed to run backtest');
+    } catch (err: any) {
+      const errorMessage = err?.response?.data?.message || err?.response?.data?.error || err?.message || 'Failed to run backtest';
+      console.error('Error running backtest:', errorMessage, err);
+      setError(errorMessage);
+      alert(`Backtest failed: ${errorMessage}`);
+    } finally {
+      setPerfLoading(false);
     }
   };
 
@@ -249,6 +270,21 @@ export default function StrategyDetail() {
     }
   };
 
+  const handleCheckProfitability = async () => {
+    if (!strategy || strategy.chainId !== 101) return;
+    
+    setCheckingProfitability(true);
+    try {
+      await axios.post(`${API_URL}/testing/strategies/${strategyId}/check`);
+      setSuccess('Profitability check completed! Refresh to see updated results.');
+      setTimeout(() => setSuccess(null), 5000);
+    } catch (err: any) {
+      setError(err?.response?.data?.error || 'Failed to run profitability check');
+    } finally {
+      setCheckingProfitability(false);
+    }
+  };
+
   const equityData = useMemo(() => {
     if (!performance?.snapshots) return [];
     return performance.snapshots
@@ -262,7 +298,13 @@ export default function StrategyDetail() {
   }, [performance]);
 
   const pnlSeries = useMemo(() => {
-    const ordered = trades
+    // Filter by strategy mode
+    const filteredTrades = strategy?.mode === 'PAPER' 
+      ? trades.filter(t => !t.mode || t.mode === 'PAPER')
+      : strategy?.mode === 'LIVE'
+      ? trades.filter(t => !t.mode || t.mode === 'LIVE')
+      : trades.filter(t => !t.mode || t.mode === 'BACKTEST');
+    const ordered = filteredTrades
       .slice()
       .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
     let cumulative = 0;
@@ -274,17 +316,23 @@ export default function StrategyDetail() {
         tradePnl: t.pnl,
       };
     });
-  }, [trades]);
+  }, [trades, strategy?.mode]);
 
-  const tradePoints = useMemo(
-    () =>
-      trades.map((t) => ({
+  const tradePoints = useMemo(() => {
+    // Filter by strategy mode - only show trades matching the strategy mode
+    const filteredTrades = strategy?.mode === 'PAPER' 
+      ? trades.filter(t => !t.mode || t.mode === 'PAPER') // PAPER mode: show PAPER trades only
+      : strategy?.mode === 'LIVE'
+      ? trades.filter(t => !t.mode || t.mode === 'LIVE') // LIVE mode: show LIVE trades only
+      : trades.filter(t => !t.mode || t.mode === 'BACKTEST'); // BACKTEST/SIMULATION: show BACKTEST trades
+    return filteredTrades
+      .filter((t) => t.exitPrice) // Only closed trades for distribution
+      .map((t) => ({
         timestamp: new Date(t.timestamp).getTime(),
         pnl: t.pnl,
         pnlPct: t.pnlPct,
-      })),
-    [trades]
-  );
+      }));
+  }, [trades, strategy?.mode]);
 
   if (loading) {
     return <div className="p-8">Loading...</div>;
@@ -359,8 +407,50 @@ export default function StrategyDetail() {
         </div>
 
         {error && (
-          <div className="mb-4 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-red-800">
+          <div className="mb-4 rounded-md border border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-900/20 px-4 py-3 text-red-800 dark:text-red-200">
             {error}
+            <button
+              onClick={() => setError(null)}
+              className="ml-4 text-red-600 dark:text-red-400 hover:text-red-800 dark:hover:text-red-200"
+            >
+              ✕
+            </button>
+          </div>
+        )}
+
+        {success && (
+          <div className="mb-4 rounded-md border border-green-200 dark:border-green-800 bg-green-50 dark:bg-green-900/20 px-4 py-3 text-green-800 dark:text-green-200">
+            {success}
+            <button
+              onClick={() => setSuccess(null)}
+              className="ml-4 text-green-600 dark:text-green-400 hover:text-green-800 dark:hover:text-green-200"
+            >
+              ✕
+            </button>
+          </div>
+        )}
+
+        {/* Trading Status Dashboard - Show for all strategies in PAPER mode */}
+        {strategy && strategy.mode === 'PAPER' && (
+          <div className="mb-6">
+            <TradingStatus strategyId={strategyId} autoRefresh={true} refreshInterval={30000} />
+          </div>
+        )}
+
+        {/* Profitability Progress Section - Show for Solana strategies in PAPER mode */}
+        {strategy && strategy.chainId === 101 && strategy.mode === 'PAPER' && (
+          <div className="mb-6">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-2xl font-bold text-gray-900 dark:text-white">Profitability Testing</h2>
+              <button
+                onClick={handleCheckProfitability}
+                disabled={checkingProfitability}
+                className="px-4 py-2 bg-purple-600 text-white rounded-md hover:bg-purple-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed text-sm font-semibold"
+              >
+                {checkingProfitability ? 'Checking...' : '🔄 Run Check Now'}
+              </button>
+            </div>
+            <ProfitabilityProgress strategyId={strategyId} autoRefresh={true} refreshInterval={30000} />
           </div>
         )}
 
@@ -413,7 +503,7 @@ export default function StrategyDetail() {
                           ⚠️ Wallet Required
                         </p>
                         <p className="text-xs text-amber-600 dark:text-amber-400">
-                          Connect your EVM or Solana wallet to enable live trading with real funds
+                          Connect your EVM wallet to enable live trading with real funds
                         </p>
                       </div>
                     </>
@@ -501,9 +591,20 @@ export default function StrategyDetail() {
                 </div>
               </div>
             ) : (
-              <div className="text-center py-8 text-gray-500 dark:text-gray-400">
-                <p>No performance data yet</p>
-                <p className="text-xs mt-2">Run a backtest to see results</p>
+              <div className="text-center py-12">
+                <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-gray-100 dark:bg-gray-700 mb-4">
+                  <span className="text-2xl">📊</span>
+                </div>
+                <p className="text-gray-900 dark:text-white font-medium mb-1">No performance data yet</p>
+                <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
+                  Run a backtest or start paper trading to see results
+                </p>
+                <button
+                  onClick={handleBacktest}
+                  className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors text-sm"
+                >
+                  🚀 Run Backtest
+                </button>
               </div>
             )}
           </div>
@@ -827,13 +928,25 @@ export default function StrategyDetail() {
 
         {showWalletConnect && (
           <div className="mt-6">
-            <WalletConnect
-              onConnected={(connectedWallet) => {
-                setWallet(connectedWallet);
-                setShowWalletConnect(false);
-                setSuccess('Wallet connected successfully!');
-              }}
-            />
+            {strategy?.chainId === 101 ? (
+              <SolanaWalletActivate
+                strategyId={strategyId}
+                onActivated={() => {
+                  setShowWalletConnect(false);
+                  fetchStrategy();
+                  setSuccess('Solana wallet activated! Live trading will start after profitability check.');
+                }}
+                onCancel={() => setShowWalletConnect(false)}
+              />
+            ) : (
+              <WalletConnect
+                onConnected={(connectedWallet) => {
+                  setWallet(connectedWallet);
+                  setShowWalletConnect(false);
+                  setSuccess('Wallet connected successfully!');
+                }}
+              />
+            )}
           </div>
         )}
       </main>

@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import Link from 'next/link';
 import axios from 'axios';
 import { useWebSocket } from '../hooks/useWebSocket';
 
@@ -16,6 +17,7 @@ interface LiveTrade {
   symbol: string;
   pnl: number;
   mode: string;
+  chainId?: number;
 }
 
 export function LiveActivity() {
@@ -40,6 +42,8 @@ export function LiveActivity() {
             const trades = tradesRes.data.map((t: any) => ({
               ...t,
               strategyName: strategy.name,
+              strategyId: strategy.id,
+              chainId: strategy.chainId,
               timestamp: new Date(t.timestamp).getTime(),
             }));
             allTrades.push(...trades);
@@ -73,6 +77,8 @@ export function LiveActivity() {
         if (exists) return prev;
         return [{
           ...trade,
+          strategyId: trade.strategyId || '',
+          chainId: trade.chainId,
           timestamp: trade.timestamp || Date.now(),
         }, ...prev].slice(0, 10);
       });
@@ -123,9 +129,19 @@ export function LiveActivity() {
                   <span className={`text-lg ${isBuy ? 'text-green-600' : 'text-red-600'}`}>
                     {isBuy ? '🟢' : '🔴'}
                   </span>
-                  <div>
-                    <div className="font-semibold text-gray-900 dark:text-white">
-                      {trade.strategyName}
+                  <div className="flex-1">
+                    <div className="flex items-center gap-2">
+                      <Link
+                        href={`/strategies/${trade.strategyId}`}
+                        className="font-semibold text-gray-900 dark:text-white hover:text-blue-600 dark:hover:text-blue-400 transition-colors"
+                      >
+                        {trade.strategyName}
+                      </Link>
+                      {trade.chainId === 101 && (
+                        <span className="px-1.5 py-0.5 text-xs bg-purple-100 dark:bg-purple-900 text-purple-800 dark:text-purple-200 rounded">
+                          SOL
+                        </span>
+                      )}
                     </div>
                     <div className="text-xs text-gray-500 dark:text-gray-400">
                       {trade.side} {trade.symbol} • {timeAgo === 0 ? 'Just now' : `${timeAgo}m ago`}
@@ -142,20 +158,20 @@ export function LiveActivity() {
           })}
         </div>
       ) : (
-        <div className="text-center py-8">
-          <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-blue-100 dark:bg-blue-900/30 mb-4">
-            <span className="text-2xl">⏳</span>
+        <div className="text-center py-12">
+          <div className="inline-flex items-center justify-center w-20 h-20 rounded-full bg-blue-100 dark:bg-blue-900/30 mb-6">
+            <span className="text-4xl">⏳</span>
           </div>
-          <p className="text-gray-900 dark:text-white font-medium mb-1">Waiting for first trades</p>
-          <p className="text-sm text-gray-500 dark:text-gray-400 mb-3">
+          <p className="text-gray-900 dark:text-white font-semibold text-lg mb-2">Waiting for first trades</p>
+          <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
             {activeStrategies} strateg{activeStrategies !== 1 ? 'ies are' : 'y is'} actively monitoring markets
           </p>
-          <div className="flex items-center justify-center gap-2 text-xs text-gray-400 dark:text-gray-500">
+          <div className="flex items-center justify-center gap-2 text-xs text-gray-500 dark:text-gray-400 mb-2">
             <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
-            <span>Strategies checking every 30 seconds</span>
+            <span>Strategies checking every 10-30 seconds</span>
           </div>
-          <p className="text-xs text-gray-400 dark:text-gray-500 mt-2">
-            First trades typically appear within 5-10 minutes
+          <p className="text-xs text-gray-500 dark:text-gray-400">
+            First trades typically appear within 5-10 minutes of activation
           </p>
         </div>
       )}

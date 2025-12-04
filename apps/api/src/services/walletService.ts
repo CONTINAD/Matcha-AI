@@ -239,10 +239,44 @@ export class WalletService {
     iv: string,
     tag: string
   ): Promise<{ success: boolean; message: string; expiresAt?: Date }> {
-    // 1. Check profitability first
-    const profitability = await profitGate.checkProfitability(strategyId, 50); // Quick check with 50 sims
+    // 0. Check paper trade count - REQUIRE 200+ paper trades first
+    const paperTrades = await prisma.trade.findMany({
+      where: {
+        strategyId,
+        mode: 'PAPER',
+      },
+    });
+
+    if (paperTrades.length < 200) {
+      return {
+        success: false,
+        message: `Need at least 200 paper trades before live trading. Currently have ${paperTrades.length} paper trades. Keep paper trading to build track record.`,
+      };
+    }
+
+    // Check if recent paper trades are still successful
+    const recentPaperTrades = paperTrades
+      .filter(t => t.exitPrice !== null)
+      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+      .slice(0, 50); // Last 50 closed trades
+
+    if (recentPaperTrades.length >= 10) {
+      const recentWins = recentPaperTrades.filter(t => t.pnl > 0).length;
+      const recentWinRate = recentWins / recentPaperTrades.length;
+      const recentTotalPnL = recentPaperTrades.reduce((sum, t) => sum + t.pnl, 0);
+
+      if (recentWinRate < 0.5 || recentTotalPnL < 0) {
+        return {
+          success: false,
+          message: `Recent paper trading performance is poor (${(recentWinRate * 100).toFixed(1)}% win rate, $${recentTotalPnL.toFixed(2)} P&L). Need consistent success before live trading.`,
+        };
+      }
+    }
+
+    // 1. Check profitability first (AGGRESSIVE REQUIREMENTS: 50%+ monthly, Sharpe >3.0, Win Rate >65%)
+    const profitability = await profitGate.checkProfitability(strategyId, 100); // Full check with 100 sims
     if (!profitability.passed) {
-      // Try recent performance as fallback
+      // Try recent performance as fallback (requires 100+ trades)
       const recent = await profitGate.checkRecentPerformance(strategyId);
       if (!recent.passed) {
         return {

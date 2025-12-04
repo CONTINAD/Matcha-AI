@@ -85,8 +85,14 @@ export class Backtester {
     let lastDailyReset = candles[0]?.timestamp || Date.now();
     const dayMs = 24 * 60 * 60 * 1000;
 
-    // Skip candles to reduce AI calls (process every 4th candle for speed)
-    const candleSkip = Math.max(1, Math.floor(candles.length / 100)); // Process max 100 candles
+    // Skip candles to reduce processing time (process max 100 candles for speed)
+    // Optimize: process fewer candles but ensure we have enough for indicators
+    const maxCandlesToProcess = Math.min(100, candles.length);
+    const candleSkip = candles.length > maxCandlesToProcess 
+      ? Math.max(1, Math.floor(candles.length / maxCandlesToProcess))
+      : 1;
+    
+    logger.info({ totalCandles: candles.length, processing: Math.floor((candles.length - 20) / candleSkip) + 1, skip: candleSkip }, 'Backtest optimization');
     
     for (let i = 20; i < candles.length; i += candleSkip) {
       // Need at least 20 candles for indicators
@@ -260,8 +266,11 @@ export class Backtester {
             };
 
             trades.push(trade);
+            // Non-blocking: call onTrade but don't await (let it batch)
             if (onTrade) {
-              await onTrade(trade);
+              onTrade(trade).catch((error) => {
+                logger.warn({ error }, 'onTrade callback failed (non-blocking)');
+              });
             }
             
             if (strategyId && strategyId !== 'backtest') {
@@ -380,8 +389,11 @@ export class Backtester {
             };
 
             trades.push(closeTrade);
+            // Non-blocking: call onTrade but don't await (let it batch)
             if (onTrade) {
-              await onTrade(closeTrade);
+              onTrade(closeTrade).catch((error) => {
+                logger.warn({ error }, 'onTrade callback failed (non-blocking)');
+              });
             }
             
             // Broadcast trade via WebSocket
@@ -498,7 +510,12 @@ export class Backtester {
           totalTrades: closedTrades.length,
         };
         snapshots.push(snapshot);
-        await onSnapshot(snapshot);
+        // Non-blocking: call onSnapshot but don't await (let it batch)
+        if (onSnapshot) {
+          onSnapshot(snapshot).catch((error) => {
+            logger.warn({ error }, 'onSnapshot callback failed (non-blocking)');
+          });
+        }
         lastSnapshotAt = currentCandle.timestamp;
       }
     }
@@ -698,14 +715,17 @@ export class Backtester {
       }
       
       // Convert signal strength to action and confidence
-      if (signalStrength >= 4) {
+      // Lower threshold for entry (3 instead of 4) to generate more trades
+      // But require stronger signals for higher confidence
+      if (signalStrength >= 3) {
         action = 'long';
-        confidence = Math.min(0.85, 0.5 + (signalStrength - 4) * 0.1);
-      } else if (signalStrength <= -4) {
+        // Scale confidence: 3 = 0.5, 4 = 0.6, 5 = 0.7, 6+ = 0.8+
+        confidence = Math.min(0.85, 0.4 + (signalStrength - 3) * 0.15);
+      } else if (signalStrength <= -3) {
         action = 'short';
-        confidence = Math.min(0.85, 0.5 + (Math.abs(signalStrength) - 4) * 0.1);
+        confidence = Math.min(0.85, 0.4 + (Math.abs(signalStrength) - 3) * 0.15);
       } else {
-        // Weak signal - stay flat or reduce position
+        // Weak signal - stay flat
         action = 'flat';
         confidence = 0.2;
       }
@@ -713,9 +733,17 @@ export class Backtester {
       // Adjust confidence based on recent performance
       const totalTrades = context.performance.totalTrades || 0;
       if (context.performance.winRate > 0.55 && totalTrades > 10) {
-        confidence = Math.min(0.9, confidence * 1.1); // Boost if winning
+        confidence = Math.min(0.9, confidence * 1.15); // Boost more if winning
       } else if (context.performance.winRate < 0.45 && totalTrades > 10) {
-        confidence = Math.max(0.3, confidence * 0.9); // Reduce if losing
+        confidence = Math.max(0.3, confidence * 0.85); // Reduce more if losing
+      }
+      
+      // Additional filter: Only take trades if we have enough indicators confirming
+      const indicatorsPresent = [rsi, shortMA, longMA, macd, bbUpper, bbLower].filter(Boolean).length;
+      if (indicatorsPresent < 3 && action !== 'flat') {
+        // Need at least 3 indicators to confirm
+        action = 'flat';
+        confidence = 0.2;
       }
     } else if (price > 0 && candles.length >= 5) {
       // Fallback: Enhanced price momentum with multiple candles

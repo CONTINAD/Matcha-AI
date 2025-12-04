@@ -22,6 +22,38 @@ async function cleanupTestStrategies() {
     const strategiesToDelete: string[] = [];
 
     for (const strategy of allStrategies) {
+      // PROTECT: Never delete strategies with LIVE or PAPER trades (real trading data)
+      const hasLiveTrades = strategy.trades.some(t => t.mode === 'LIVE');
+      const hasPaperTrades = strategy.trades.some(t => t.mode === 'PAPER');
+      const hasBacktestTrades = strategy.trades.some(t => t.mode === 'BACKTEST');
+      
+      // PROTECT: Never delete active strategies
+      if (strategy.status === 'ACTIVE') {
+        logger.info(
+          { id: strategy.id, name: strategy.name },
+          'Protected: Active strategy (skipping)'
+        );
+        continue;
+      }
+
+      // PROTECT: Never delete strategies with real trading data (LIVE or PAPER)
+      if (hasLiveTrades || hasPaperTrades) {
+        logger.info(
+          { id: strategy.id, name: strategy.name, liveTrades: hasLiveTrades, paperTrades: hasPaperTrades },
+          'Protected: Has real trading data (skipping)'
+        );
+        continue;
+      }
+
+      // PROTECT: Never delete strategies with significant backtest data (learning data)
+      if (hasBacktestTrades && strategy.trades.length >= 10) {
+        logger.info(
+          { id: strategy.id, name: strategy.name, backtestTrades: strategy.trades.length },
+          'Protected: Has significant backtest data for learning (skipping)'
+        );
+        continue;
+      }
+
       // Check if it's a test strategy by name
       const isTestByName =
         strategy.name.toLowerCase().includes('test') ||
@@ -29,52 +61,60 @@ async function cleanupTestStrategies() {
         strategy.name.toLowerCase().includes('example') ||
         strategy.name.toLowerCase().includes('sample');
 
-      // Check performance
+      // Only delete if:
+      // 1. Named as test AND has no real trading data
+      // 2. Has only BACKTEST trades (not real data) AND terrible performance
+      // 3. No trades at all AND old AND named as test
       const closedTrades = strategy.trades.filter((t) => t.exitPrice);
       const totalTrades = closedTrades.length;
       
       if (totalTrades > 0) {
-        const totalPnL = closedTrades.reduce((sum, t) => sum + t.pnl, 0);
-        const winRate = closedTrades.filter((t) => t.pnl > 0).length / totalTrades;
-        const avgLoss = totalPnL / totalTrades;
+        // Only consider BACKTEST trades for deletion (not PAPER or LIVE)
+        const backtestTrades = closedTrades.filter(t => t.mode === 'BACKTEST');
+        if (backtestTrades.length === 0) {
+          // Has PAPER or LIVE trades - already protected above, but double-check
+          continue;
+        }
 
-        // Delete if:
-        // 1. Named as test
-        // 2. Has trades but terrible performance (negative P&L and low win rate)
-        // 3. Has many trades but consistently losing
+        const totalPnL = backtestTrades.reduce((sum, t) => sum + t.pnl, 0);
+        const winRate = backtestTrades.filter((t) => t.pnl > 0).length / backtestTrades.length;
+        const avgLoss = totalPnL / backtestTrades.length;
+
+        // Only delete if:
+        // 1. Named as test AND has only backtest trades
+        // 2. Has many backtest trades but consistently losing (and named as test)
         const isPoorPerformer =
-          (totalTrades >= 10 && totalPnL < -100 && winRate < 0.3) ||
-          (totalTrades >= 5 && totalPnL < -50 && winRate < 0.25) ||
-          (totalTrades >= 20 && avgLoss < -5);
+          (backtestTrades.length >= 20 && totalPnL < -200 && winRate < 0.25) ||
+          (backtestTrades.length >= 10 && totalPnL < -100 && winRate < 0.2);
 
-        if (isTestByName || isPoorPerformer) {
+        if (isTestByName && isPoorPerformer) {
           strategiesToDelete.push(strategy.id);
           logger.info(
             {
               id: strategy.id,
               name: strategy.name,
-              reason: isTestByName ? 'test name' : 'poor performance',
-              trades: totalTrades,
+              reason: 'test name + poor backtest performance',
+              trades: backtestTrades.length,
               pnl: totalPnL,
               winRate: (winRate * 100).toFixed(1) + '%',
             },
-            'Marked for deletion'
+            'Marked for deletion (backtest only)'
           );
         }
       } else {
-        // No trades - delete if old (more than 7 days) or named as test
+        // No trades - delete if old (more than 30 days) AND named as test
         const daysSinceCreation =
           (Date.now() - new Date(strategy.createdAt).getTime()) / (1000 * 60 * 60 * 24);
-        if (isTestByName || daysSinceCreation > 7) {
+        if (isTestByName && daysSinceCreation > 30) {
           strategiesToDelete.push(strategy.id);
           logger.info(
             {
               id: strategy.id,
               name: strategy.name,
-              reason: isTestByName ? 'test name' : 'no trades and old',
+              reason: 'test name + no trades + old',
               daysOld: daysSinceCreation.toFixed(1),
             },
-            'Marked for deletion'
+            'Marked for deletion (no trades)'
           );
         }
       }

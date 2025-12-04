@@ -141,8 +141,8 @@ export class WebSocketService {
     });
   }
 
-  broadcastStatus(strategyId: string, status: string) {
-    const message = this.createEvent('status', strategyId, { status });
+  broadcastStatus(strategyId: string, status: any) {
+    const message = this.createEvent('status', strategyId, typeof status === 'string' ? { status } : status);
 
     this.clients.forEach((client) => {
       if (client.strategyIds.has(strategyId)) {

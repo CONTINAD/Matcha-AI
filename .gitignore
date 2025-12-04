@@ -53,3 +53,7 @@ prisma/migrations/*.sql.bak
 # GitHub config (contains user info)
 .github-config
 .env.bak
+
+# Encrypted private keys (NEVER commit these)
+*.encrypted
+.solana-key.encrypted

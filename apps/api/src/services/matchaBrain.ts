@@ -6,6 +6,9 @@ import { PrismaClient } from '@prisma/client';
 import { multiTimeframeAnalyzer } from './multiTimeframeAnalyzer';
 import { advancedTrainer } from './advancedTrainer';
 import { strategyEngine } from './strategyEngine';
+import { priceService } from './priceService';
+import { riskManager } from './riskManager';
+import { predictionTrainer } from './predictionTrainer';
 import type {
   MarketContext,
   Decision,
@@ -136,12 +139,29 @@ You must respond with a valid JSON object matching this structure:
         const chainId = strategy?.chainId || 1;
         const baseAsset = strategy?.baseAsset || 'USDC';
         
-        // 1. Check for arbitrage opportunities (>2% edge)
-        const arb = await strategyEngine.detectArb(chainId, baseAsset, [symbol], 2.0);
-        if (arb) {
-          strategyDecision = strategyEngine.arbToDecision(arb);
-          logger.info({ strategyId, symbol, edge: arb.edge }, 'Arbitrage opportunity detected - prioritizing over AI');
+        // 1. Check for arbitrage opportunities (>1.5% edge for Solana, >2% for EVM)
+        let arb: any = null;
+        if (chainId === 101) {
+          // Solana: use Jupiter API for arbitrage detection
+          const solanaArb = await strategyEngine.detectSolanaArb(
+            symbol === 'SOL' ? 'So11111111111111111111111111111111111111112' : symbol,
+            baseAsset === 'USDC' ? 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v' : baseAsset,
+            1.5 // 1.5% min edge for Solana
+          );
+          if (solanaArb) {
+            strategyDecision = solanaArb;
+            logger.info({ strategyId, symbol, confidence: solanaArb.confidence }, 'Solana arbitrage opportunity detected - prioritizing over AI');
+          }
         } else {
+          // EVM: use 0x API for arbitrage detection
+          arb = await strategyEngine.detectArb(chainId, baseAsset, [symbol], 2.0);
+          if (arb) {
+            strategyDecision = strategyEngine.arbToDecision(arb);
+            logger.info({ strategyId, symbol, edge: arb.edge }, 'Arbitrage opportunity detected - prioritizing over AI');
+          }
+        }
+        
+        if (!strategyDecision) {
           // 2. Check for mean reversion signals
           const meanRev = await strategyEngine.meanReversionSignal(chainId, baseAsset, symbol, 30);
           if (meanRev.action !== 'hold') {
@@ -281,25 +301,262 @@ Make a sophisticated trading decision considering ALL factors. Explain your reas
 - Risk/reward assessment
 - Position sizing rationale`;
 
+    // Define tools for function calling
+    const tools = [
+      {
+        type: 'function' as const,
+        function: {
+          name: 'getCurrentPrice',
+          description: 'Get current token price from 0x API or CoinGecko. Use this when you need real-time price data during decision making.',
+          parameters: {
+            type: 'object',
+            properties: {
+              symbol: { type: 'string', description: 'Token symbol (e.g., WETH, SOL)' },
+              baseAsset: { type: 'string', description: 'Base asset for price quote (e.g., USDC)' },
+              chainId: { type: 'number', description: 'Chain ID (1=Ethereum, 137=Polygon, 101=Solana)' },
+            },
+            required: ['symbol', 'baseAsset', 'chainId'],
+          },
+        },
+      },
+      {
+        type: 'function' as const,
+        function: {
+          name: 'checkRiskLimits',
+          description: 'Check if a proposed trade would violate risk limits. Use this before finalizing position size.',
+          parameters: {
+            type: 'object',
+            properties: {
+              positionSizePct: { type: 'number', description: 'Proposed position size as percentage of equity (0-100)' },
+              dailyPnl: { type: 'number', description: 'Current daily P&L' },
+              currentEquity: { type: 'number', description: 'Current account equity' },
+              maxPositionPct: { type: 'number', description: 'Maximum allowed position size percentage' },
+              maxDailyLossPct: { type: 'number', description: 'Maximum allowed daily loss percentage' },
+            },
+            required: ['positionSizePct', 'dailyPnl', 'currentEquity', 'maxPositionPct', 'maxDailyLossPct'],
+          },
+        },
+      },
+      {
+        type: 'function' as const,
+        function: {
+          name: 'getHistoricalPerformance',
+          description: 'Get recent trade performance and patterns for learning. Use this to understand what has worked well recently.',
+          parameters: {
+            type: 'object',
+            properties: {
+              strategyId: { type: 'string', description: 'Strategy ID to analyze' },
+              lookbackDays: { type: 'number', description: 'Number of days to look back (default: 7)' },
+            },
+            required: ['strategyId'],
+          },
+        },
+      },
+    ];
+
+    // Structured output schema for guaranteed response format
+    const decisionSchema = {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: ['long', 'short', 'flat'],
+          description: 'Trading action to take',
+        },
+        confidence: {
+          type: 'number',
+          minimum: 0,
+          maximum: 1,
+          description: 'Confidence level (0-1)',
+        },
+        targetPositionSizePct: {
+          type: 'number',
+          minimum: 0,
+          maximum: 100,
+          description: 'Target position size as percentage of equity (0-100)',
+        },
+        notes: {
+          type: 'string',
+          description: 'Explanation of the decision',
+        },
+        reasoning: {
+          type: 'object',
+          properties: {
+            marketRegime: {
+              type: 'string',
+              enum: ['trending', 'ranging', 'volatile', 'calm', 'choppy', 'uncertain'],
+            },
+            keyFactors: {
+              type: 'array',
+              items: { type: 'string' },
+            },
+            riskAssessment: {
+              type: 'string',
+              enum: ['low', 'medium', 'high'],
+            },
+            patternMatch: {
+              type: ['string', 'null'],
+            },
+          },
+        },
+      },
+      required: ['action', 'confidence', 'targetPositionSizePct', 'notes'],
+    } as const;
+
     const endTimer = decisionLatency.startTimer({ mode: 'single' });
     try {
-      const response = await this.openai.chat.completions.create({
-        model: 'gpt-5.1', // Upgraded from gpt-4-turbo-preview
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userPrompt },
-        ],
-        response_format: { type: 'json_object' },
-        temperature: 0.3, // Lower temperature for more consistent decisions
-        reasoning_effort: 'medium', // Adaptive reasoning: fast for simple, deep for complex
-      });
-
-      const content = response.choices[0]?.message?.content;
-      if (!content) {
-        throw new Error('No response from OpenAI');
+      // Get strategy chainId and baseAsset for tool calls
+      let strategyChainId = 1;
+      let strategyBaseAsset = 'USDC';
+      if (strategyId) {
+        try {
+          const strategy = await prisma.strategy.findUnique({
+            where: { id: strategyId },
+            select: { chainId: true, baseAsset: true },
+          });
+          if (strategy) {
+            strategyChainId = strategy.chainId || 1;
+            strategyBaseAsset = strategy.baseAsset || 'USDC';
+          }
+        } catch (error) {
+          logger.warn({ error }, 'Could not fetch strategy for tool calls');
+        }
       }
 
-      const decision = JSON.parse(content) as Decision & { reasoning?: any };
+      const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt },
+      ];
+
+      let decision: Decision & { reasoning?: any };
+      let maxToolIterations = 3; // Allow up to 3 tool call iterations
+      let iteration = 0;
+
+      // Handle tool calls in a loop
+      while (iteration < maxToolIterations) {
+        const response = await this.openai.chat.completions.create({
+          model: 'gpt-5.1',
+          messages,
+          tools: iteration === 0 ? tools : undefined, // Only send tools on first call
+          tool_choice: iteration === 0 ? 'auto' : 'none', // Let AI decide when to use tools
+          response_format: {
+            type: 'json_schema',
+            json_schema: {
+              name: 'trading_decision',
+              schema: decisionSchema,
+            },
+          },
+          temperature: 0.3,
+          reasoning_effort: 'medium',
+        });
+
+        const message = response.choices[0]?.message;
+        if (!message) {
+          throw new Error('No response from OpenAI');
+        }
+
+        // Handle tool calls
+        if (message.tool_calls && message.tool_calls.length > 0) {
+          messages.push(message); // Add assistant message with tool calls
+
+          // Execute tool calls
+          for (const toolCall of message.tool_calls) {
+            const functionName = toolCall.function.name;
+            const args = JSON.parse(toolCall.function.arguments);
+
+            let toolResult: any;
+            try {
+              if (functionName === 'getCurrentPrice') {
+                const symbol = strategyConfig.universe[0] || args.symbol;
+                const price = await priceService.getLivePrice(args.chainId, args.baseAsset, symbol);
+                toolResult = {
+                  price,
+                  symbol,
+                  baseAsset: args.baseAsset,
+                  chainId: args.chainId,
+                  timestamp: Date.now(),
+                };
+                logger.info({ symbol, price, chainId: args.chainId }, 'Tool: getCurrentPrice called');
+              } else if (functionName === 'checkRiskLimits') {
+                const dailyLossPct = args.dailyPnl < 0 ? Math.abs(args.dailyPnl) / args.currentEquity : 0;
+                const allowed = 
+                  args.positionSizePct <= args.maxPositionPct &&
+                  dailyLossPct < args.maxDailyLossPct / 100;
+                toolResult = {
+                  allowed,
+                  reason: allowed ? 'Within limits' : 
+                    args.positionSizePct > args.maxPositionPct ? 'Position size exceeds maximum' :
+                    'Daily loss limit exceeded',
+                  positionSizePct: args.positionSizePct,
+                  dailyLossPct: dailyLossPct * 100,
+                  maxPositionPct: args.maxPositionPct,
+                  maxDailyLossPct: args.maxDailyLossPct,
+                };
+                logger.info({ allowed, reason: toolResult.reason }, 'Tool: checkRiskLimits called');
+              } else if (functionName === 'getHistoricalPerformance') {
+                const historicalDecisions = await predictionTrainer.getHistoricalDecisions(
+                  args.strategyId,
+                  args.lookbackDays || 7
+                );
+                const recentTrades = await prisma.trade.findMany({
+                  where: {
+                    strategyId: args.strategyId,
+                    exitPrice: { not: null }, // Only closed trades
+                  },
+                  orderBy: { timestamp: 'desc' },
+                  take: 30,
+                });
+                const winRate = recentTrades.length > 0
+                  ? recentTrades.filter(t => (t.pnl || 0) > 0).length / recentTrades.length
+                  : 0;
+                const avgPnl = recentTrades.length > 0
+                  ? recentTrades.reduce((sum, t) => sum + (t.pnl || 0), 0) / recentTrades.length
+                  : 0;
+                toolResult = {
+                  winRate: winRate * 100,
+                  avgPnl,
+                  totalTrades: recentTrades.length,
+                  historicalDecisions: historicalDecisions.length,
+                  recentPatterns: historicalDecisions.slice(0, 5).map(d => ({
+                    action: d.decision.action,
+                    confidence: d.decision.confidence,
+                    outcome: d.outcome,
+                  })),
+                };
+                logger.info({ winRate, avgPnl, totalTrades: recentTrades.length }, 'Tool: getHistoricalPerformance called');
+              } else {
+                toolResult = { error: `Unknown function: ${functionName}` };
+              }
+            } catch (error: any) {
+              logger.error({ error, functionName }, 'Tool execution failed');
+              toolResult = { error: error.message || 'Tool execution failed' };
+            }
+
+            // Add tool result to messages
+            messages.push({
+              role: 'tool',
+              tool_call_id: toolCall.id,
+              content: JSON.stringify(toolResult),
+            });
+          }
+
+          iteration++;
+          continue; // Continue loop to get final decision
+        }
+
+        // No tool calls - parse the decision
+        const content = message.content;
+        if (!content) {
+          throw new Error('No content in OpenAI response');
+        }
+
+        decision = JSON.parse(content) as Decision & { reasoning?: any };
+        break; // Exit loop with decision
+      }
+
+      if (!decision) {
+        throw new Error('Failed to get decision after tool calls');
+      }
 
       // Validate decision structure
       if (!['long', 'short', 'flat'].includes(decision.action)) {

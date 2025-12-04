@@ -241,7 +241,6 @@ Return as JSON array of recommendation strings.`;
           { role: 'user', content: userPrompt },
         ],
         response_format: { type: 'json_object' },
-        temperature: 0.7,
         reasoning_effort: 'medium',
       });
 
@@ -348,7 +347,6 @@ Return as JSON with array of insights, each with: insight, confidence (0-1), act
           { role: 'user', content: userPrompt },
         ],
         response_format: { type: 'json_object' },
-        temperature: 0.7,
         reasoning_effort: 'medium',
       });
 

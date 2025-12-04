@@ -65,9 +65,12 @@ export function PortfolioView() {
               pnl: perf.totalPnL || 0,
             });
 
-            // By chain
-            const chainKey = strategy.chainId === 101 ? 'Solana' : 
-                           strategy.chainId === 1 ? 'Ethereum' :
+            // By chain (only EVM chains, exclude Solana)
+            if (strategy.chainId === 101) {
+              // Skip Solana strategies in portfolio breakdown
+              continue;
+            }
+            const chainKey = strategy.chainId === 1 ? 'Ethereum' :
                            strategy.chainId === 137 ? 'Polygon' :
                            strategy.chainId === 42161 ? 'Arbitrum' : 'Other';
             if (!portfolioStats.byChain[chainKey]) {

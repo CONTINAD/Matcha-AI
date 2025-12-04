@@ -1,0 +1,53 @@
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
+tmp/
+temp/
+
+# Build outputs
+dist/
+.next/
+out/
+*.tsbuildinfo
+*.js.map
+*.d.ts.map
+
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Database
+*.db
+*.sqlite
+
+# Environment
+.env.local
+.env.*.local
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Testing
+coverage/
+.nyc_output/
+
+# Encrypted keys
+*.encrypted
+.solana-key.encrypted
+

@@ -25,11 +25,11 @@ export function WalletConnect({ onConnected }: WalletConnectProps) {
     setSuccess(null);
 
     try {
+      // First, connect wallet (stores address only, no private key)
       const response = await axios.post(`${API_URL}/wallets/connect`, {
         chainType,
         address: address.trim(),
-        privateKey: privateKey.trim(),
-        chainId: chainType === 'EVM' ? 1 : undefined, // Ethereum mainnet for EVM
+        chainId: chainType === 'EVM' ? 1 : chainType === 'SOLANA' ? 101 : undefined,
         maxTradingAmount: maxAmount,
       });
 

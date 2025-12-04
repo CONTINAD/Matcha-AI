@@ -228,3 +228,5 @@ After 20+ trades, the AI:
 **Your AI is actively learning right now from those 247 trades!**
 
 
+
+

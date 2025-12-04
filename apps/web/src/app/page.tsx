@@ -8,6 +8,7 @@ import { ToastContainer } from '../components/Toast';
 import { LiveActivity } from '../components/LiveActivity';
 import { SystemStatus } from '../components/SystemStatus';
 import { PortfolioView } from '../components/PortfolioView';
+import { TradingActivity } from '../components/TradingActivity';
 import { StrategyFilters, FilterOptions } from '../components/StrategyFilters';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
@@ -20,6 +21,7 @@ interface Strategy {
   baseAsset: string;
   timeframe: string;
   createdAt: string;
+  chainId?: number;
 }
 
 interface PerformanceSummary {
@@ -32,6 +34,7 @@ export default function Dashboard() {
   const [strategies, setStrategies] = useState<Strategy[]>([]);
   const [loading, setLoading] = useState(true);
   const [performanceData, setPerformanceData] = useState<Record<string, PerformanceSummary>>({});
+  const [profitabilityData, setProfitabilityData] = useState<Record<string, any>>({});
   const [bestStrategies, setBestStrategies] = useState<any[]>([]);
   const [showBest, setShowBest] = useState(true);
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
@@ -39,7 +42,7 @@ export default function Dashboard() {
   const [filters, setFilters] = useState<FilterOptions>({
     status: 'all',
     mode: 'all',
-    chainId: 'all',
+    chainId: 'evm-only', // Default to EVM only (exclude Solana)
     timeframe: 'all',
     sortBy: 'created',
     sortOrder: 'desc',
@@ -83,6 +86,21 @@ export default function Dashboard() {
           .catch(() => {
             // Silently fail - performance data is optional
           });
+
+        // Fetch profitability data for Solana strategies in PAPER mode
+        if (strategy.chainId === 101 && strategy.mode === 'PAPER') {
+          axios
+            .get(`${API_URL}/strategies/${strategy.id}/profitability-check`)
+            .then((res) => {
+              setProfitabilityData((prev) => ({
+                ...prev,
+                [strategy.id]: res.data,
+              }));
+            })
+            .catch(() => {
+              // Silently fail - profitability data is optional
+            });
+        }
       });
     }
   }, [strategies]);
@@ -150,6 +168,31 @@ export default function Dashboard() {
               </button>
               <DarkModeToggle />
               <Link
+                href="/portfolio"
+                className="px-4 py-2 text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white transition-colors"
+              >
+                Portfolio
+              </Link>
+              <Link
+                href="/analytics"
+                className="px-4 py-2 text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white transition-colors"
+              >
+                Analytics
+              </Link>
+              <Link
+                href="/settings"
+                className="px-4 py-2 text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white transition-colors"
+              >
+                Settings
+              </Link>
+              <Link
+                href="/testing"
+                className="px-4 py-2 bg-purple-600 text-white rounded-md hover:bg-purple-700 transition-colors"
+                title="Extended Testing Dashboard"
+              >
+                Testing
+              </Link>
+              <Link
                 href="/strategies/new"
                 className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors"
               >
@@ -179,7 +222,7 @@ export default function Dashboard() {
                 <span>•</span>
                 <span>Real-time AI Decisions</span>
                 <span>•</span>
-                <span>Multi-Chain Support</span>
+                <span>EVM Chains (0x API)</span>
               </div>
               {mounted && lastRefresh && (
                 <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">
@@ -202,7 +245,7 @@ export default function Dashboard() {
               <div className="flex items-center justify-between">
                 <div>
                   <div className="text-xs text-blue-600 dark:text-blue-300 font-medium uppercase tracking-wide">Total Strategies</div>
-                  <div className="text-3xl font-bold text-blue-900 dark:text-blue-100 mt-1">{strategies.length}</div>
+              <div className="text-3xl font-bold text-blue-900 dark:text-blue-100 mt-1">{strategies.length}</div>
                 </div>
                 <div className="text-2xl">📊</div>
               </div>
@@ -211,8 +254,8 @@ export default function Dashboard() {
               <div className="flex items-center justify-between">
                 <div>
                   <div className="text-xs text-green-600 dark:text-green-300 font-medium uppercase tracking-wide">Active Now</div>
-                  <div className="text-3xl font-bold text-green-900 dark:text-green-100 mt-1">
-                    {strategies.filter((s) => s.status === 'ACTIVE').length}
+              <div className="text-3xl font-bold text-green-900 dark:text-green-100 mt-1">
+                {strategies.filter((s) => s.status === 'ACTIVE').length}
                   </div>
                 </div>
                 <div className="text-2xl">⚡</div>
@@ -222,8 +265,8 @@ export default function Dashboard() {
               <div className="flex items-center justify-between">
                 <div>
                   <div className="text-xs text-purple-600 dark:text-purple-300 font-medium uppercase tracking-wide">Total Trades</div>
-                  <div className="text-3xl font-bold text-purple-900 dark:text-purple-100 mt-1">
-                    {Object.values(performanceData).reduce((sum, p) => sum + (p.totalTrades || 0), 0)}
+              <div className="text-3xl font-bold text-purple-900 dark:text-purple-100 mt-1">
+                {Object.values(performanceData).reduce((sum, p) => sum + (p.totalTrades || 0), 0)}
                   </div>
                 </div>
                 <div className="text-2xl">💹</div>
@@ -250,6 +293,9 @@ export default function Dashboard() {
 
         {/* Portfolio Overview */}
         {strategies.length > 0 && <PortfolioView />}
+
+        {/* Trading Activity Monitoring */}
+        <TradingActivity />
 
         {/* Live Activity Dashboard */}
         <LiveActivity />
@@ -334,17 +380,24 @@ export default function Dashboard() {
 
         {loading ? (
           <div className="text-center py-12">
-            <div className="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
-            <p className="mt-4 text-gray-500 dark:text-gray-400">Loading strategies...</p>
+            <div className="inline-block animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
+            <p className="mt-4 text-gray-500 dark:text-gray-400 font-medium">Loading strategies...</p>
+            <p className="mt-2 text-sm text-gray-400 dark:text-gray-500">Fetching data from API...</p>
           </div>
         ) : strategies.length === 0 ? (
-          <div className="text-center py-12">
-            <p className="text-gray-500 dark:text-gray-400 mb-4">No strategies yet</p>
+          <div className="text-center py-16">
+            <div className="inline-flex items-center justify-center w-20 h-20 rounded-full bg-blue-100 dark:bg-blue-900/30 mb-6">
+              <span className="text-4xl">📊</span>
+            </div>
+            <h3 className="text-xl font-bold text-gray-900 dark:text-white mb-2">No strategies yet</h3>
+            <p className="text-gray-500 dark:text-gray-400 mb-6 max-w-md mx-auto">
+              Create your first trading strategy to start automated trading with AI-powered decisions
+            </p>
             <Link
               href="/strategies/new"
-              className="inline-block px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors"
+              className="inline-block px-6 py-3 bg-gradient-to-r from-blue-600 to-purple-600 text-white rounded-lg hover:from-blue-700 hover:to-purple-700 transition-all shadow-lg hover:shadow-xl font-semibold"
             >
-              Create Your First Strategy
+              + Create Your First Strategy
             </Link>
           </div>
         ) : (
@@ -356,13 +409,19 @@ export default function Dashboard() {
               totalStrategies={strategies.length}
             />
 
-            <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
+          <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
               {strategies
                 .filter((strategy) => {
                   // Apply filters
                   if (filters.status !== 'all' && strategy.status !== filters.status) return false;
                   if (filters.mode !== 'all' && strategy.mode !== filters.mode) return false;
-                  if (filters.chainId !== 'all' && strategy.chainId?.toString() !== filters.chainId) return false;
+                  // Handle chain filter: 'evm-only' excludes Solana (101), 'all' shows all, specific chain shows only that chain
+                  if (filters.chainId === 'evm-only') {
+                    // Exclude Solana (chainId 101)
+                    if (strategy.chainId === 101) return false;
+                  } else if (filters.chainId !== 'all' && strategy.chainId?.toString() !== filters.chainId) {
+                    return false;
+                  }
                   if (filters.timeframe !== 'all' && strategy.timeframe !== filters.timeframe) return false;
                   if (filters.search && !strategy.name.toLowerCase().includes(filters.search.toLowerCase())) return false;
                   return true;
@@ -428,6 +487,23 @@ export default function Dashboard() {
                         >
                           {strategy.mode}
                         </span>
+                        {/* Profitability Badge for Solana Strategies */}
+                        {strategy.chainId === 101 && strategy.mode === 'PAPER' && profitabilityData[strategy.id] && (
+                          <span
+                            className={`px-2 py-1 text-xs font-semibold rounded ${
+                              profitabilityData[strategy.id].passed
+                                ? 'bg-green-100 dark:bg-green-900 text-green-800 dark:text-green-200'
+                                : profitabilityData[strategy.id].progress?.overall >= 75
+                                ? 'bg-yellow-100 dark:bg-yellow-900 text-yellow-800 dark:text-yellow-200'
+                                : 'bg-gray-100 dark:bg-gray-700 text-gray-800 dark:text-gray-200'
+                            }`}
+                            title={profitabilityData[strategy.id].message}
+                          >
+                            {profitabilityData[strategy.id].passed
+                              ? '✅ Ready'
+                              : `Testing ${Math.round(profitabilityData[strategy.id].progress?.overall || 0)}%`}
+                          </span>
+                        )}
                       </div>
                     </div>
 
@@ -496,7 +572,7 @@ export default function Dashboard() {
                 </Link>
               );
             })}
-            </div>
+          </div>
           </>
         )}
       </main>

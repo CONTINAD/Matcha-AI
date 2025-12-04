@@ -48,6 +48,7 @@ model Strategy {
   limitOrders         LimitOrder[]
   copyTargets          CopyTarget[]
   modelInsights        ModelInsight[]
+  profitabilityChecks  ProfitabilityCheck[]
 
   @@index([userId])
   @@index([status])
@@ -71,9 +72,24 @@ model Trade {
   pnlPct      Float    @default(0)
   txHash      String?
 
+  // Execution quality metrics
+  executionQuality Float?  // Overall execution quality score (0-1)
+  actualSlippage   Float?  // Actual slippage in basis points
+  fillRate         Float?  // Percentage of order filled (0-1)
+  
+  // Learning data - store market context at trade time for AI learning
+  marketContextAtEntry String?  // JSON: indicators, price action, volatility at entry
+  marketContextAtExit  String?  // JSON: indicators, price action, volatility at exit
+  predictionId         String?  // Link to Prediction that generated this trade
+  
+  transaction      Transaction?
+  tradeAnalytics   TradeAnalytics?
+
   @@index([strategyId])
   @@index([timestamp])
   @@index([mode])
+  @@index([txHash])
+  @@index([predictionId]) // For linking trades to predictions for learning
 }
 
 model PerformanceSnapshot {
@@ -234,5 +250,77 @@ model Prediction {
   @@index([timestamp])
   @@index([outcome])
   @@index([evaluatedAt])
+}
+
+model ProfitabilityCheck {
+  id          String   @id @default(cuid())
+  strategyId  String
+  strategy    Strategy @relation(fields: [strategyId], references: [id], onDelete: Cascade)
+  
+  timestamp   DateTime @default(now())
+  sharpe      Float?
+  avgReturn   Float?
+  winRate     Float?
+  maxDrawdown Float?
+  passed      Boolean
+  details     String?  @default("{}") // JSON with additional details
+  message     String?
+  
+  @@index([strategyId])
+  @@index([timestamp])
+  @@index([passed])
+}
+
+model Transaction {
+  id          String   @id @default(cuid())
+  tradeId     String?  @unique
+  trade       Trade?   @relation(fields: [tradeId], references: [id], onDelete: Cascade)
+  
+  txHash      String   @unique
+  chainId     Int
+  status      String   @default("PENDING") // PENDING, CONFIRMED, FAILED, REVERTED
+  blockNumber Int?
+  gasUsed     String?
+  gasPrice    String?
+  submittedAt DateTime @default(now())
+  confirmedAt DateTime?
+  failedAt    DateTime?
+  failureReason String?
+  
+  @@index([txHash])
+  @@index([status])
+  @@index([chainId])
+  @@index([submittedAt])
+}
+
+model TradeAnalytics {
+  id              String   @id @default(cuid())
+  tradeId         String   @unique
+  trade           Trade    @relation(fields: [tradeId], references: [id], onDelete: Cascade)
+  
+  strategyId      String
+  timestamp       DateTime @default(now())
+  chainId         Int
+  txHash          String
+  
+  // Execution quality metrics
+  expectedPrice   String   // Expected price from quote
+  actualPrice     String   // Actual execution price
+  slippageBps     Int      // Actual slippage in basis points
+  fillRate        Float    // 0-1, percentage of order filled
+  executionTimeMs Int      // Time from submission to confirmation in milliseconds
+  gasUsed         String?
+  gasPrice        String?
+  priceImpact     String?  // Price impact percentage
+  
+  sellToken       String
+  buyToken        String
+  sellAmount      String
+  buyAmount       String
+  
+  @@index([strategyId])
+  @@index([timestamp])
+  @@index([txHash])
+  @@index([chainId])
 }
 

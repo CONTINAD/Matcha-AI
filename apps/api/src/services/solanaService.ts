@@ -40,22 +40,51 @@ export class SolanaService {
    * Get a quote from Jupiter Aggregator
    */
   async getJupiterQuote(params: JupiterQuoteParams): Promise<JupiterQuote> {
-    try {
-      const response = await axios.get<JupiterQuote>(`${this.jupiterApiUrl}/quote`, {
-        params: {
-          inputMint: params.inputMint,
-          outputMint: params.outputMint,
-          amount: params.amount.toString(),
-          slippageBps: params.slippageBps || 50, // 0.5% default
-        },
-        timeout: 10000,
-      });
+    const maxRetries = 2;
+    let lastError: any = null;
+    
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      try {
+        const response = await axios.get<JupiterQuote>(`${this.jupiterApiUrl}/quote`, {
+          params: {
+            inputMint: params.inputMint,
+            outputMint: params.outputMint,
+            amount: params.amount.toString(),
+            slippageBps: params.slippageBps || 50, // 0.5% default
+          },
+          timeout: 15000, // Increased from 10s to 15s
+        });
 
-      return response.data;
-    } catch (error: any) {
-      logger.error({ error: error.message, params }, 'Jupiter API error');
-      throw new Error(`Jupiter API error: ${error.message}`);
+        return response.data;
+      } catch (error: any) {
+        lastError = error;
+        const isNetworkError = error.code === 'ECONNREFUSED' || error.code === 'ENOTFOUND' || error.code === 'ETIMEDOUT';
+        const isRetryable = isNetworkError || (error.response?.status >= 500 && error.response?.status < 600);
+        
+        if (attempt < maxRetries - 1 && isRetryable) {
+          const delay = 1000 * (attempt + 1); // 1s, 2s
+          logger.warn({ 
+            attempt: attempt + 1, 
+            maxRetries, 
+            delay, 
+            error: error.message,
+            code: error.code,
+            status: error.response?.status 
+          }, 'Retrying Jupiter API call');
+          await new Promise(resolve => setTimeout(resolve, delay));
+        } else {
+          break;
+        }
+      }
     }
+    
+    logger.error({ 
+      error: lastError?.message, 
+      params,
+      code: lastError?.code,
+      status: lastError?.response?.status 
+    }, 'Jupiter API error after retries');
+    throw new Error(`Jupiter API error after ${maxRetries} attempts: ${lastError?.message || 'Unknown error'}`);
   }
 
   /**

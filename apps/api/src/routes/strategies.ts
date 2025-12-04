@@ -1,5 +1,4 @@
 import { FastifyInstance } from 'fastify';
-import { PrismaClient } from '@prisma/client';
 import { backtester } from '../services/backtester';
 import { dataFeed } from '../services/dataFeed';
 import { paperTrader } from '../services/paperTrader';
@@ -19,10 +18,10 @@ import { copyTradingService } from '../services/copyTradingService';
 import { portfolioRebalancer } from '../services/portfolioRebalancer';
 import { advancedTrainer } from '../services/advancedTrainer';
 import { walletService } from '../services/walletService';
+import { profitGate } from '../services/profitGate';
 import type { StrategyConfig } from '@matcha-ai/shared';
 import { logger } from '../config/logger';
-
-const prisma = new PrismaClient();
+import { prisma } from '../config/database';
 
 export async function strategyRoutes(fastify: FastifyInstance) {
   // Create or update strategy
@@ -230,11 +229,11 @@ export async function strategyRoutes(fastify: FastifyInstance) {
   fastify.post('/strategies/:id/backtest', async (request, reply) => {
     try {
       const { id } = request.params as { id: string };
-      const body = request.body as {
+      const body = (request.body as {
         from?: number;
         to?: number;
         initialEquity?: number;
-      };
+      }) || {};
 
       const strategy = await prisma.strategy.findUnique({
         where: { id },
@@ -247,11 +246,12 @@ export async function strategyRoutes(fastify: FastifyInstance) {
       const config: StrategyConfig = JSON.parse(strategy.configJson);
       const universe = JSON.parse(strategy.universeJson) as string[];
 
-      const from = body.from || Date.now() - 30 * 24 * 60 * 60 * 1000; // 30 days ago
-      const to = body.to || Date.now();
-      const initialEquity = body.initialEquity || 10000;
+      const from = body?.from || Date.now() - 30 * 24 * 60 * 60 * 1000; // 30 days ago
+      const to = body?.to || Date.now();
+      const initialEquity = body?.initialEquity || 10000;
 
       // Get historical candles for first symbol (simplified)
+      logger.info({ strategyId: id, symbol: universe[0], chainId: strategy.chainId, from, to }, 'Fetching historical candles for backtest');
       let candles = await dataFeed.getHistoricalCandles({
         symbol: universe[0] || 'USDC',
         timeframe: strategy.timeframe,
@@ -259,6 +259,7 @@ export async function strategyRoutes(fastify: FastifyInstance) {
         to,
         chainId: strategy.chainId || 1,
       });
+      logger.info({ strategyId: id, candleCount: candles.length }, 'Fetched candles for backtest');
 
       // Limit candles for faster backtesting (max 100 candles)
       // Skip candles to reduce processing time
@@ -268,49 +269,136 @@ export async function strategyRoutes(fastify: FastifyInstance) {
         logger.info({ originalCount: candles.length * skip, limitedCount: candles.length }, 'Limited candles for faster backtest');
       }
 
+      if (candles.length === 0) {
+        logger.warn({ strategyId: id }, 'No candles available for backtest');
+        return reply.code(400).send({ 
+          error: 'No historical data available',
+          message: 'Could not fetch historical candles. Please try again later or check data source configuration.'
+        });
+      }
+
+      logger.info({ strategyId: id, candleCount: candles.length, initialEquity }, 'Starting backtest');
+      
+      // Batch database writes for performance
+      const tradesToSave: Array<{
+        strategyId: string;
+        timestamp: Date;
+        mode: string;
+        symbol: string;
+        side: string;
+        size: number;
+        entryPrice: number;
+        exitPrice: number | null;
+        fees: number;
+        slippage: number;
+        pnl: number;
+        pnlPct: number;
+      }> = [];
+      const snapshotsToSave: Array<{
+        strategyId: string;
+        timestamp: Date;
+        equityCurvePoint: number;
+        maxDrawdown: number;
+        sharpe: number | null;
+        winRate: number;
+        totalTrades: number;
+      }> = [];
+      
+      const BATCH_SIZE = 20; // Save every 20 trades
       let persistedTrades = 0;
       let persistedSnapshots = 0;
 
-      const result = await backtester.runBacktest({
+      // Flush batched writes
+      const flushTrades = async () => {
+        if (tradesToSave.length > 0) {
+          try {
+            await prisma.trade.createMany({
+              data: tradesToSave,
+              skipDuplicates: true,
+            });
+            persistedTrades += tradesToSave.length;
+            tradesToSave.length = 0;
+          } catch (error) {
+            logger.warn({ error }, 'Failed to batch save trades, will retry at end');
+          }
+        }
+      };
+
+      const flushSnapshots = async () => {
+        if (snapshotsToSave.length > 0) {
+          try {
+            await prisma.performanceSnapshot.createMany({
+              data: snapshotsToSave,
+              skipDuplicates: true,
+            });
+            persistedSnapshots += snapshotsToSave.length;
+            snapshotsToSave.length = 0;
+          } catch (error) {
+            logger.warn({ error }, 'Failed to batch save snapshots, will retry at end');
+          }
+        }
+      };
+
+      // Add timeout wrapper (60 seconds max)
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        setTimeout(() => {
+          reject(new Error('Backtest timeout after 60 seconds'));
+        }, 60000);
+      });
+
+      const backtestPromise = backtester.runBacktest({
         strategyId: id,
         strategyConfig: config,
         candles,
         initialEquity,
         fastMode: true, // Use fast rule-based decisions instead of AI
         onTrade: async (trade) => {
-          persistedTrades += 1;
-          await prisma.trade.create({
-            data: {
-              strategyId: id,
-              timestamp: new Date(trade.timestamp),
-              mode: 'BACKTEST',
-              symbol: trade.symbol,
-              side: trade.side,
-              size: trade.size,
-              entryPrice: trade.entryPrice,
-              exitPrice: trade.exitPrice,
-              fees: trade.fees,
-              slippage: trade.slippage,
-              pnl: trade.pnl,
-              pnlPct: trade.pnlPct,
-            },
+          // Non-blocking: add to batch instead of immediate write
+          tradesToSave.push({
+            strategyId: id,
+            timestamp: new Date(trade.timestamp),
+            mode: 'BACKTEST',
+            symbol: trade.symbol,
+            side: trade.side,
+            size: trade.size,
+            entryPrice: trade.entryPrice,
+            exitPrice: trade.exitPrice,
+            fees: trade.fees,
+            slippage: trade.slippage,
+            pnl: trade.pnl,
+            pnlPct: trade.pnlPct,
           });
+          
+          // Flush when batch is full (non-blocking)
+          if (tradesToSave.length >= BATCH_SIZE) {
+            await flushTrades();
+          }
         },
         onSnapshot: async (snapshot) => {
-          persistedSnapshots += 1;
-          await prisma.performanceSnapshot.create({
-            data: {
-              strategyId: id,
-              timestamp: new Date(snapshot.timestamp),
-              equityCurvePoint: snapshot.equity,
-              maxDrawdown: snapshot.maxDrawdown,
-              sharpe: snapshot.sharpe,
-              winRate: snapshot.winRate,
-              totalTrades: snapshot.totalTrades,
-            },
+          // Non-blocking: add to batch
+          snapshotsToSave.push({
+            strategyId: id,
+            timestamp: new Date(snapshot.timestamp),
+            equityCurvePoint: snapshot.equity,
+            maxDrawdown: snapshot.maxDrawdown,
+            sharpe: snapshot.sharpe ?? null,
+            winRate: snapshot.winRate,
+            totalTrades: snapshot.totalTrades,
           });
+          
+          // Flush when batch is full (non-blocking)
+          if (snapshotsToSave.length >= BATCH_SIZE) {
+            await flushSnapshots();
+          }
         },
       });
+
+      // Race between backtest and timeout
+      const result = await Promise.race([backtestPromise, timeoutPromise]);
+      
+      // Flush any remaining batched writes
+      await flushTrades();
+      await flushSnapshots();
 
       // Fallback persistence if hooks failed or were not used
       if (persistedTrades === 0 && result.trades.length > 0) {
@@ -348,8 +436,17 @@ export async function strategyRoutes(fastify: FastifyInstance) {
 
       return reply.send(result);
     } catch (error) {
-      logger.error({ error }, 'Error running backtest');
-      return reply.code(500).send({ error: 'Failed to run backtest' });
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      const errorStack = error instanceof Error ? error.stack : undefined;
+      logger.error({ 
+        error: errorMessage, 
+        stack: errorStack,
+        errorType: error?.constructor?.name 
+      }, 'Error running backtest');
+      return reply.code(500).send({ 
+        error: 'Failed to run backtest',
+        message: errorMessage 
+      });
     }
   });
 
@@ -359,9 +456,12 @@ export async function strategyRoutes(fastify: FastifyInstance) {
       const { id } = request.params as { id: string };
       await paperTrader.start(id);
       return reply.send({ message: 'Paper trading started' });
-    } catch (error) {
-      logger.error({ error }, 'Error starting paper trading');
-      return reply.code(500).send({ error: 'Failed to start paper trading' });
+    } catch (error: any) {
+      logger.error({ error: error.message }, 'Error starting paper trading');
+      return reply.code(500).send({ 
+        error: 'Failed to start paper trading',
+        message: error.message || 'Unknown error'
+      });
     }
   });
 
@@ -371,9 +471,16 @@ export async function strategyRoutes(fastify: FastifyInstance) {
       const { id } = request.params as { id: string };
       await paperTrader.stop(id);
       return reply.send({ message: 'Paper trading stopped' });
-    } catch (error) {
-      logger.error({ error }, 'Error stopping paper trading');
-      return reply.code(500).send({ error: 'Failed to stop paper trading' });
+    } catch (error: any) {
+      logger.error({ error: error.message }, 'Error stopping paper trading');
+      // Don't fail if already stopped - just return success
+      if (error.message?.includes('already stopped') || error.message?.includes('not active')) {
+        return reply.send({ message: 'Paper trading already stopped' });
+      }
+      return reply.code(500).send({ 
+        error: 'Failed to stop paper trading',
+        message: error.message || 'Unknown error'
+      });
     }
   });
 
@@ -436,6 +543,44 @@ export async function strategyRoutes(fastify: FastifyInstance) {
           error: 'Solana live trading not supported',
           message: 'Live trading is only available for EVM chains (Ethereum, Polygon, Arbitrum). Use SIMULATION or PAPER mode for Solana strategies.',
         });
+      }
+
+      // REQUIRE 200+ paper trades before allowing live trading
+      const paperTrades = await prisma.trade.findMany({
+        where: {
+          strategyId: id,
+          mode: 'PAPER',
+        },
+      });
+
+      if (paperTrades.length < 200) {
+        return reply.code(403).send({
+          error: 'Insufficient paper trading history',
+          message: `Need at least 200 paper trades before live trading. Currently have ${paperTrades.length} paper trades. Keep paper trading to build track record.`,
+          paperTradeCount: paperTrades.length,
+          requiredCount: 200,
+        });
+      }
+
+      // Check if recent paper trades are still successful
+      const recentPaperTrades = paperTrades
+        .filter(t => t.exitPrice !== null)
+        .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+        .slice(0, 50); // Last 50 closed trades
+
+      if (recentPaperTrades.length >= 10) {
+        const recentWins = recentPaperTrades.filter(t => t.pnl > 0).length;
+        const recentWinRate = recentWins / recentPaperTrades.length;
+        const recentTotalPnL = recentPaperTrades.reduce((sum, t) => sum + t.pnl, 0);
+
+        if (recentWinRate < 0.5 || recentTotalPnL < 0) {
+          return reply.code(403).send({
+            error: 'Recent performance insufficient',
+            message: `Recent paper trading performance is poor (${(recentWinRate * 100).toFixed(1)}% win rate, $${recentTotalPnL.toFixed(2)} P&L). Need consistent success before live trading.`,
+            recentWinRate: recentWinRate * 100,
+            recentTotalPnL,
+          });
+        }
       }
       
       await liveTrader.start(id, body.walletId);
@@ -504,10 +649,19 @@ export async function strategyRoutes(fastify: FastifyInstance) {
       const { id } = request.params as { id: string };
       const { limit = 100, mode } = request.query as { limit?: number; mode?: string };
 
+      // Get strategy to determine which mode to filter by if not specified
+      const strategy = await prisma.strategy.findUnique({
+        where: { id },
+        select: { mode: true },
+      });
+
+      // Default to strategy mode if mode not specified
+      const tradeMode = mode || (strategy?.mode === 'PAPER' ? 'PAPER' : strategy?.mode === 'LIVE' ? 'LIVE' : undefined);
+
       const trades = await prisma.trade.findMany({
         where: {
           strategyId: id,
-          ...(mode ? { mode } : {}),
+          ...(tradeMode ? { mode: tradeMode } : {}),
         },
         orderBy: { timestamp: 'desc' },
         take: parseInt(limit.toString(), 10),
@@ -524,6 +678,15 @@ export async function strategyRoutes(fastify: FastifyInstance) {
   fastify.get('/strategies/:id/performance', async (request, reply) => {
     try {
       const { id } = request.params as { id: string };
+      
+      // Get strategy to determine which mode to filter by
+      const strategy = await prisma.strategy.findUnique({
+        where: { id },
+        select: { mode: true },
+      });
+
+      // Filter trades by strategy mode - PAPER strategies should only show PAPER trades
+      const tradeMode = strategy?.mode === 'PAPER' ? 'PAPER' : strategy?.mode === 'LIVE' ? 'LIVE' : 'BACKTEST';
 
       const snapshots = await prisma.performanceSnapshot.findMany({
         where: { strategyId: id },
@@ -532,7 +695,10 @@ export async function strategyRoutes(fastify: FastifyInstance) {
       });
 
       const trades = await prisma.trade.findMany({
-        where: { strategyId: id },
+        where: { 
+          strategyId: id,
+          mode: tradeMode, // Filter by strategy mode
+        },
         orderBy: { timestamp: 'desc' },
       });
 
@@ -550,6 +716,7 @@ export async function strategyRoutes(fastify: FastifyInstance) {
           totalPnL,
           winRate,
           latestSnapshot: snapshots[0],
+          mode: tradeMode, // Include mode in response
         },
       });
     } catch (error) {
@@ -773,7 +940,7 @@ export async function strategyRoutes(fastify: FastifyInstance) {
       // Get predictions
       const predictions = await prisma.prediction.findMany({
         where: { strategyId: id },
-        orderBy: { createdAt: 'desc' },
+        orderBy: { timestamp: 'desc' },
         take: 100,
       });
       
@@ -1124,6 +1291,262 @@ export async function strategyRoutes(fastify: FastifyInstance) {
     } catch (error: any) {
       logger.error({ error }, 'Error generating strategies');
       return reply.code(500).send({ error: error.message || 'Failed to generate strategies' });
+    }
+  });
+
+  // Profitability Check Endpoint
+  fastify.get('/strategies/:id/profitability-check', async (request, reply) => {
+    try {
+      const { id } = request.params as { id: string };
+      const { force } = request.query as { force?: string };
+
+      const strategy = await prisma.strategy.findUnique({
+        where: { id },
+        include: {
+          trades: {
+            where: { mode: 'PAPER' },
+            orderBy: { timestamp: 'desc' },
+          },
+          profitabilityChecks: {
+            orderBy: { timestamp: 'desc' },
+            take: 7, // Last 7 checks for trend
+          },
+        },
+      });
+
+      if (!strategy) {
+        return reply.code(404).send({ error: 'Strategy not found' });
+      }
+
+      // Calculate days in paper trading
+      const daysInTesting = Math.floor(
+        (Date.now() - new Date(strategy.createdAt).getTime()) / (1000 * 60 * 60 * 24)
+      );
+
+      // Get recent profitability check or run new one
+      let recentCheck = strategy.profitabilityChecks[0];
+      const shouldRunNewCheck = force === 'true' || !recentCheck || 
+        (Date.now() - new Date(recentCheck.timestamp).getTime()) > 6 * 60 * 60 * 1000; // 6 hours
+
+      if (shouldRunNewCheck) {
+        // Run both checks
+        const [backtestCheck, recentPerfCheck] = await Promise.all([
+          profitGate.checkProfitability(id, 20), // Use 20 sims (increased from 10) for better accuracy
+          profitGate.checkRecentPerformance(id),
+        ]);
+
+        // Use recent performance if available, otherwise backtest
+        const checkResult = recentPerfCheck.passed ? recentPerfCheck : backtestCheck;
+
+        // Save to database
+        recentCheck = await prisma.profitabilityCheck.create({
+          data: {
+            strategyId: id,
+            sharpe: checkResult.sharpe ?? null,
+            avgReturn: checkResult.avgReturn ?? null,
+            winRate: checkResult.winRate ?? null,
+            maxDrawdown: checkResult.maxDrawdown ?? null,
+            passed: checkResult.passed,
+            details: JSON.stringify(checkResult.details || {}),
+            message: checkResult.message,
+          },
+        });
+      }
+
+      // Calculate progress toward each requirement (updated to realistic but strict targets)
+      const requirements = {
+        sharpe: { target: 2.0, current: recentCheck.sharpe ?? 0, passed: (recentCheck.sharpe ?? 0) > 2.0 },
+        return: { target: 25, current: recentCheck.avgReturn ?? 0, passed: (recentCheck.avgReturn ?? 0) > 25 },
+        winRate: { target: 55, current: (recentCheck.winRate ?? 0) * 100, passed: (recentCheck.winRate ?? 0) > 0.55 },
+        drawdown: { target: 15, current: recentCheck.maxDrawdown ?? 0, passed: (recentCheck.maxDrawdown ?? 0) < 15 },
+      };
+
+      // Calculate overall progress (percentage of requirements met)
+      const progressPct = (Object.values(requirements).filter(r => r.passed).length / 4) * 100;
+
+      // Get historical trend
+      const historicalTrend = strategy.profitabilityChecks.map(check => ({
+        timestamp: check.timestamp,
+        sharpe: check.sharpe,
+        avgReturn: check.avgReturn,
+        winRate: check.winRate,
+        maxDrawdown: check.maxDrawdown,
+        passed: check.passed,
+      }));
+
+      // Determine recommendation
+      let recommendation: 'continue_testing' | 'ready_for_live' | 'needs_improvement' = 'continue_testing';
+      if (recentCheck.passed && daysInTesting >= 7) {
+        recommendation = 'ready_for_live';
+      } else if (progressPct < 50) {
+        recommendation = 'needs_improvement';
+      }
+
+      // Get trade count
+      const totalTrades = strategy.trades.length;
+      const recentTrades = strategy.trades.filter(
+        t => Date.now() - new Date(t.timestamp).getTime() < 7 * 24 * 60 * 60 * 1000
+      ).length;
+
+      return reply.send({
+        strategyId: id,
+        strategyName: strategy.name,
+        passed: recentCheck.passed,
+        progress: {
+          overall: progressPct,
+          requirements,
+        },
+        metrics: {
+          sharpe: recentCheck.sharpe,
+          avgReturn: recentCheck.avgReturn,
+          winRate: recentCheck.winRate,
+          maxDrawdown: recentCheck.maxDrawdown,
+        },
+        testing: {
+          daysInTesting,
+          totalTrades,
+          recentTrades,
+        },
+        recommendation,
+        message: recentCheck.message,
+        historicalTrend,
+        lastCheck: recentCheck.timestamp,
+      });
+    } catch (error: any) {
+      logger.error({ error }, 'Error checking profitability');
+      return reply.code(500).send({ error: error.message || 'Failed to check profitability' });
+    }
+  });
+
+  // Get trading status and diagnostics
+  fastify.get('/strategies/:id/trading-status', async (request, reply) => {
+    try {
+      const { id } = request.params as { id: string };
+
+      const strategy = await prisma.strategy.findUnique({
+        where: { id },
+        include: {
+          trades: {
+            where: { mode: 'PAPER' },
+            orderBy: { timestamp: 'desc' },
+            take: 1,
+          },
+        },
+      });
+
+      if (!strategy) {
+        return reply.code(404).send({ error: 'Strategy not found' });
+      }
+
+      // Get trading metrics from paperTrader
+      const metrics = paperTrader.getTradingMetrics(id);
+      const isActive = paperTrader.isActive(id);
+
+      // Get last trade
+      const lastTrade = strategy.trades[0] || null;
+
+      // Get recent trades count
+      const recentTradesCount = await prisma.trade.count({
+        where: {
+          strategyId: id,
+          mode: 'PAPER',
+          timestamp: {
+            gte: new Date(Date.now() - 24 * 60 * 60 * 1000), // Last 24 hours
+          },
+        },
+      });
+
+      // Determine why trades aren't happening (if applicable)
+      const issues: string[] = [];
+      if (!isActive) {
+        issues.push('Paper trading is not active');
+      } else if (metrics) {
+        if (metrics.totalDecisions === 0) {
+          issues.push('No decisions have been made (strategy may not be running)');
+        } else if (metrics.tradesExecuted === 0 && metrics.totalDecisions > 0) {
+          if (metrics.riskBlocks > metrics.totalDecisions * 0.8) {
+            issues.push('Most decisions blocked by risk manager (>80%)');
+          } else if (metrics.lastDecision?.action === 'flat') {
+            issues.push('Last decision was FLAT (no trading signal)');
+          } else if (metrics.lastDecision && metrics.lastDecision.confidence < 0.5) {
+            issues.push(`Low confidence decisions (last: ${(metrics.lastDecision.confidence * 100).toFixed(0)}%)`);
+          } else {
+            issues.push('Decisions made but trades not executing (check risk manager)');
+          }
+        }
+        
+        const hoursSinceLastDecision = metrics.lastDecisionTime > 0
+          ? Math.floor((Date.now() - metrics.lastDecisionTime) / (1000 * 60 * 60))
+          : null;
+        if (hoursSinceLastDecision !== null && hoursSinceLastDecision > 1) {
+          issues.push(`No decisions in ${hoursSinceLastDecision} hours (strategy may be stuck)`);
+        }
+      }
+
+      return reply.send({
+        strategyId: id,
+        strategyName: strategy.name,
+        isActive,
+        status: strategy.status,
+        mode: strategy.mode,
+        metrics: metrics ? {
+          totalDecisions: metrics.totalDecisions,
+          openaiCalls: metrics.openaiCalls,
+          fastDecisions: metrics.fastDecisions,
+          cacheHits: metrics.cacheHits,
+          riskBlocks: metrics.riskBlocks,
+          tradesExecuted: metrics.tradesExecuted,
+          tradesBlocked: metrics.tradesBlocked,
+          lastDecisionTime: metrics.lastDecisionTime > 0 ? new Date(metrics.lastDecisionTime).toISOString() : null,
+          lastTradeTime: metrics.lastTradeTime > 0 ? new Date(metrics.lastTradeTime).toISOString() : null,
+          lastDecision: metrics.lastDecision ? {
+            action: metrics.lastDecision.action,
+            confidence: metrics.lastDecision.confidence,
+            targetPositionSizePct: metrics.lastDecision.targetPositionSizePct,
+            notes: metrics.lastDecision.notes,
+          } : null,
+          lastDecisionReason: metrics.lastDecisionReason || null,
+          decisionHistory: metrics.decisionHistory.map(d => ({
+            action: d.action,
+            confidence: d.confidence,
+            signalStrength: d.signalStrength,
+            timestamp: new Date(d.timestamp).toISOString(),
+            notes: d.notes,
+            indicators: d.indicators,
+          })),
+          signalStrengthHistory: metrics.signalStrengthHistory,
+          actionDistribution: metrics.actionDistribution,
+          dataFeedHealth: {
+            lastSuccessTime: metrics.dataFeedHealth.lastSuccessTime > 0 
+              ? new Date(metrics.dataFeedHealth.lastSuccessTime).toISOString() 
+              : null,
+            lastFailureTime: metrics.dataFeedHealth.lastFailureTime 
+              ? new Date(metrics.dataFeedHealth.lastFailureTime).toISOString() 
+              : null,
+            successRate: metrics.dataFeedHealth.successRate,
+            consecutiveFailures: metrics.dataFeedHealth.consecutiveFailures,
+          },
+        } : null,
+        lastTrade: lastTrade ? {
+          id: lastTrade.id,
+          timestamp: lastTrade.timestamp.toISOString(),
+          symbol: lastTrade.symbol,
+          side: lastTrade.side,
+          pnl: lastTrade.pnl,
+        } : null,
+        recentTradesCount,
+        issues,
+        recommendations: issues.length > 0 ? [
+          'Check if strategy interval is running',
+          'Verify data feed is providing candles',
+          'Review risk manager settings',
+          'Check confidence thresholds',
+          'Ensure strategy is not hitting daily loss limits',
+        ] : [],
+      });
+    } catch (error: any) {
+      logger.error({ error }, 'Error getting trading status');
+      return reply.code(500).send({ error: error.message || 'Failed to get trading status' });
     }
   });
 }

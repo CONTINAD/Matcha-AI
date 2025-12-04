@@ -109,6 +109,89 @@ export class RiskEngine {
 
     return { violated: false, metrics: { valueAtRiskPct: varPct, conditionalVaRPct: cvarPct } };
   }
+
+  /**
+   * Dynamic position sizing based on volatility
+   * Reduces position size in high volatility environments
+   */
+  calculateVolatilityAdjustedSize(
+    baseSizePct: number,
+    volatility: number, // ATR or std dev as percentage
+    maxVolatility: number = 0.1 // 10% = high volatility threshold
+  ): number {
+    if (volatility <= 0) return baseSizePct;
+    
+    // Reduce size proportionally to volatility
+    // At maxVolatility, reduce to 50% of base size
+    const volatilityRatio = Math.min(1, volatility / maxVolatility);
+    const adjustment = 1 - (volatilityRatio * 0.5); // Scale down by up to 50%
+    
+    return Math.max(0, baseSizePct * adjustment);
+  }
+
+  /**
+   * Calculate correlation between two return series
+   * Returns correlation coefficient (-1 to 1)
+   */
+  calculateCorrelation(returns1: number[], returns2: number[]): number {
+    if (returns1.length !== returns2.length || returns1.length === 0) {
+      return 0;
+    }
+
+    const mean1 = returns1.reduce((a, b) => a + b, 0) / returns1.length;
+    const mean2 = returns2.reduce((a, b) => a + b, 0) / returns2.length;
+
+    let numerator = 0;
+    let sumSq1 = 0;
+    let sumSq2 = 0;
+
+    for (let i = 0; i < returns1.length; i++) {
+      const diff1 = returns1[i] - mean1;
+      const diff2 = returns2[i] - mean2;
+      numerator += diff1 * diff2;
+      sumSq1 += diff1 * diff1;
+      sumSq2 += diff2 * diff2;
+    }
+
+    const denominator = Math.sqrt(sumSq1 * sumSq2);
+    if (denominator === 0) return 0;
+
+    return numerator / denominator;
+  }
+
+  /**
+   * Circuit breaker for extreme market conditions
+   * Triggers when multiple risk metrics exceed thresholds
+   */
+  checkCircuitBreaker(
+    dailyPnl: number,
+    equity: number,
+    maxDrawdown: number,
+    volatility: number,
+    circuitBreakerPct?: number,
+    maxDrawdownThreshold: number = 15, // 15% max drawdown
+    volatilityThreshold: number = 0.15 // 15% volatility
+  ): { triggered: boolean; reason?: string } {
+    // Check daily loss limit
+    if (circuitBreakerPct) {
+      const lossPct = dailyPnl < 0 ? Math.abs(dailyPnl) / equity * 100 : 0;
+      if (lossPct >= circuitBreakerPct) {
+        return { triggered: true, reason: `Daily loss limit exceeded: ${lossPct.toFixed(2)}%` };
+      }
+    }
+
+    // Check max drawdown
+    if (maxDrawdown >= maxDrawdownThreshold) {
+      return { triggered: true, reason: `Max drawdown exceeded: ${maxDrawdown.toFixed(2)}%` };
+    }
+
+    // Check extreme volatility
+    if (volatility >= volatilityThreshold) {
+      return { triggered: true, reason: `Extreme volatility detected: ${(volatility * 100).toFixed(2)}%` };
+    }
+
+    return { triggered: false };
+  }
 }
 
 export const riskEngine = new RiskEngine();

@@ -116,6 +116,12 @@ export interface ZeroXQuote {
   value: string;
   gas?: string;
   gasPrice?: string;
+  // Gasless API fields
+  metaTransaction?: {
+    to: string;
+    data: string;
+    value: string;
+  };
 }
 
 export interface ZeroXSwapTx {
@@ -125,6 +131,38 @@ export interface ZeroXSwapTx {
   gas?: string;
   gasPrice?: string;
   chainId: number;
+  allowanceTarget?: string; // AllowanceHolder or Permit2 address
+}
+
+export interface GaslessQuoteParams extends ZeroXQuoteParams {
+  takerAddress: string; // Required for gasless quotes
+  enableGasless?: boolean;
+}
+
+export type TransactionStatus = 'PENDING' | 'CONFIRMED' | 'FAILED' | 'REVERTED';
+
+export interface ExecutionQuality {
+  expectedPrice: string;
+  actualPrice: string;
+  slippageBps: number; // Actual slippage in basis points
+  fillRate: number; // 0-1, percentage of order filled
+  executionTimeMs: number; // Time from submission to confirmation
+  gasUsed?: string;
+  gasPrice?: string;
+  priceImpact?: string;
+}
+
+export interface TradeAnalytics {
+  tradeId: string;
+  strategyId: string;
+  executionQuality: ExecutionQuality;
+  timestamp: number;
+  chainId: number;
+  txHash: string;
+  sellToken: string;
+  buyToken: string;
+  sellAmount: string;
+  buyAmount: string;
 }
 
 export interface ChainConfig {

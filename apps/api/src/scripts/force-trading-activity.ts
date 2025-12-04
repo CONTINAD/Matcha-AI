@@ -1,8 +1,9 @@
 #!/usr/bin/env tsx
 
 /**
- * Force trading activity for active strategies
+ * Restart trading activity for active strategies
  * Restarts paper trading to ensure they're actively checking markets
+ * Note: No longer forces fake trades - strategies will only trade when AI signals are generated
  */
 
 import dotenv from 'dotenv';
@@ -44,19 +45,35 @@ async function forceTradingActivity() {
         // Wait a moment
         await new Promise(resolve => setTimeout(resolve, 500));
 
-        // Start again
-        await paperTrader.start(strategy.id);
-        console.log(`   ▶️  Started ${strategy.name} (${strategy.timeframe})`);
+        // Start with timeout wrapper (15s max per strategy)
+        const startPromise = paperTrader.start(strategy.id);
+        const timeoutPromise = new Promise<never>((_, reject) => 
+          setTimeout(() => reject(new Error('Strategy start timeout (15s)')), 15000)
+        );
+        
+        try {
+          await Promise.race([startPromise, timeoutPromise]);
+          console.log(`   ▶️  Started ${strategy.name} (${strategy.timeframe})`);
+          
+          // Check status after starting
+          const metrics = paperTrader.getTradingMetrics(strategy.id);
+          if (metrics) {
+            console.log(`      📊 Metrics: ${metrics.totalDecisions} decisions, ${metrics.tradesExecuted} trades executed`);
+          }
+        } catch (timeoutError: any) {
+          console.log(`   ⚠️  ${strategy.name} start timed out or failed: ${timeoutError.message}`);
+          console.log(`      Continuing with next strategy...`);
+        }
       } catch (error: any) {
         console.log(`   ❌ Failed to restart ${strategy.name}: ${error.message}`);
       }
     }
 
     console.log('\n✅ All strategies restarted!');
-    console.log('\n📊 Strategies should start trading within 30-60 seconds');
+    console.log('\n📊 Strategies will start trading when AI generates signals');
     console.log('   - Checking markets every 30 seconds');
-    console.log('   - More aggressive confidence thresholds');
-    console.log('   - Forcing trades for new strategies (< 5 trades)');
+    console.log('   - Trading only when confidence thresholds are met');
+    console.log('   - No fake trades - all trades from real AI decisions');
 
   } catch (error: any) {
     console.error('❌ Error:', error.message);

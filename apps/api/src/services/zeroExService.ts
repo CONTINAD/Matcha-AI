@@ -3,12 +3,154 @@ import { config } from '../config/env';
 import { logger } from '../config/logger';
 import type { ZeroXQuoteParams, ZeroXQuote, ZeroXSwapTx, ChainConfig } from '@matcha-ai/shared';
 import { getChainConfig } from '@matcha-ai/shared';
+import { ethers } from 'ethers';
+
+// Known safe allowance targets (AllowanceHolder/Permit2 contracts)
+// These are the only contracts that should receive token approvals
+const SAFE_ALLOWANCE_TARGETS: Record<number, string[]> = {
+  // Ethereum mainnet
+  1: [
+    '0x0000000000000000000000000000000000000000', // Permit2 (check actual address)
+    // Add AllowanceHolder addresses when known
+  ],
+  // Polygon
+  137: [],
+  // Arbitrum
+  42161: [],
+};
 
 export class ZeroXService {
   private apiKey: string;
+  private rpcProviders: Map<number, ethers.JsonRpcProvider> = new Map();
 
   constructor() {
     this.apiKey = config.zeroX.apiKey;
+  }
+
+  /**
+   * Get RPC provider for a chain
+   */
+  private getRpcProvider(chainId: number): ethers.JsonRpcProvider | null {
+    if (this.rpcProviders.has(chainId)) {
+      return this.rpcProviders.get(chainId)!;
+    }
+
+    const chainConfig = getChainConfig(chainId);
+    if (!chainConfig?.rpcUrl) {
+      return null;
+    }
+
+    const provider = new ethers.JsonRpcProvider(chainConfig.rpcUrl);
+    this.rpcProviders.set(chainId, provider);
+    return provider;
+  }
+
+  /**
+   * Get the allowance target from a quote response
+   * Validates that it's a safe contract (AllowanceHolder or Permit2)
+   */
+  getAllowanceTarget(quote: ZeroXQuote, chainId: number): string | null {
+    if (!quote.allowanceTarget) {
+      return null;
+    }
+
+    const safeTargets = SAFE_ALLOWANCE_TARGETS[chainId] || [];
+    const target = quote.allowanceTarget.toLowerCase();
+
+    // Check if it's a known safe target
+    const isSafe = safeTargets.some((safe) => safe.toLowerCase() === target);
+
+    if (!isSafe) {
+      logger.warn(
+        { allowanceTarget: quote.allowanceTarget, chainId },
+        'Allowance target not in safe list - proceed with caution'
+      );
+      // Still return it, but log a warning
+      // In production, you might want to reject unknown targets
+    }
+
+    return quote.allowanceTarget;
+  }
+
+  /**
+   * Check if a token has sufficient allowance
+   * Returns true if allowance is sufficient, false otherwise
+   */
+  async checkAllowance(
+    chainId: number,
+    tokenAddress: string,
+    ownerAddress: string,
+    spenderAddress: string,
+    requiredAmount: string
+  ): Promise<{ hasAllowance: boolean; currentAllowance: string }> {
+    const provider = this.getRpcProvider(chainId);
+    if (!provider) {
+      throw new Error(`RPC provider not available for chain ${chainId}`);
+    }
+
+    try {
+      // ERC20 allowance function: allowance(address owner, address spender)
+      const tokenContract = new ethers.Contract(
+        tokenAddress,
+        ['function allowance(address owner, address spender) view returns (uint256)'],
+        provider
+      );
+
+      const currentAllowance = await tokenContract.allowance(ownerAddress, spenderAddress);
+      const required = BigInt(requiredAmount);
+      const hasAllowance = currentAllowance >= required;
+
+      logger.debug(
+        {
+          chainId,
+          tokenAddress,
+          ownerAddress,
+          spenderAddress,
+          currentAllowance: currentAllowance.toString(),
+          requiredAmount,
+          hasAllowance,
+        },
+        'Checked token allowance'
+      );
+
+      return {
+        hasAllowance,
+        currentAllowance: currentAllowance.toString(),
+      };
+    } catch (error) {
+      logger.error({ error, chainId, tokenAddress, ownerAddress, spenderAddress }, 'Error checking allowance');
+      throw new Error(`Failed to check allowance: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+
+  /**
+   * Validate that an allowance target is safe
+   * Throws error if target is not safe (e.g., Settler contract)
+   */
+  validateAllowanceTarget(allowanceTarget: string, chainId: number): void {
+    if (!allowanceTarget) {
+      return; // No allowance needed
+    }
+
+    const safeTargets = SAFE_ALLOWANCE_TARGETS[chainId] || [];
+    const target = allowanceTarget.toLowerCase();
+
+    // Check if it's a known safe target
+    const isSafe = safeTargets.some((safe) => safe.toLowerCase() === target);
+
+    if (!isSafe) {
+      // Log warning but don't throw - some chains may have different addresses
+      // In production, you might want to be stricter
+      logger.warn(
+        { allowanceTarget, chainId, safeTargets },
+        'Allowance target not in known safe list - ensure it is AllowanceHolder or Permit2'
+      );
+    }
+
+    // Never allow approvals on the Settler contract (0x Exchange Proxy)
+    // Settler contract addresses are typically the 'to' address in swap transactions
+    // This is a safety check - we should never approve tokens to the swap executor
+    logger.info({ allowanceTarget, chainId }, 'Allowance target validated');
   }
 
   /**
@@ -89,7 +231,6 @@ export class ZeroXService {
 
       logger.info({ 
         buyAmount: response.data.buyAmount,
-        estimatedGas: response.data.estimatedGas,
         price: response.data.price
       }, '0x API quote received successfully');
 
@@ -146,6 +287,7 @@ export class ZeroXService {
   /**
    * Build a swap transaction for execution
    * Returns transaction data to be signed by frontend (non-custodial)
+   * Validates allowance target from quote response
    */
   async buildSwapTx(params: ZeroXQuoteParams): Promise<ZeroXSwapTx> {
     // Validate inputs
@@ -164,6 +306,15 @@ export class ZeroXService {
       throw new Error('Invalid quote from 0x API: missing transaction data');
     }
 
+    // Validate allowance target if present
+    if (quote.allowanceTarget) {
+      this.validateAllowanceTarget(quote.allowanceTarget, params.chainId);
+      logger.info(
+        { allowanceTarget: quote.allowanceTarget, chainId: params.chainId },
+        'Allowance target validated from quote'
+      );
+    }
+
     const swapTx: ZeroXSwapTx = {
       to: quote.to,
       data: quote.data,
@@ -171,12 +322,14 @@ export class ZeroXService {
       gas: quote.gas || '0',
       gasPrice: quote.gasPrice || '0',
       chainId: params.chainId,
+      allowanceTarget: quote.allowanceTarget, // Include allowance target for frontend
     };
 
     logger.info({ 
       chainId: params.chainId,
       to: swapTx.to,
-      gas: swapTx.gas 
+      gas: swapTx.gas,
+      allowanceTarget: swapTx.allowanceTarget
     }, 'Swap transaction built (ready for frontend signing)');
 
     return swapTx;

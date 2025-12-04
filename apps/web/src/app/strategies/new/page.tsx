@@ -11,8 +11,25 @@ import { ToastContainer } from '../../../components/Toast';
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
 const STORAGE_KEY = 'matcha:new-strategy-draft';
 
-const SUPPORTED_TOKENS = ['USDC', 'USDT', 'WETH', 'DAI'];
 const TIMEFRAMES = ['1m', '5m', '15m', '1h', '4h', '1d'];
+
+// EVM chains only (exclude Solana - chainId 101)
+const SUPPORTED_CHAINS = [
+  { id: 1, name: 'Ethereum', icon: '⟠' },
+  { id: 137, name: 'Polygon', icon: '⬟' },
+  { id: 42161, name: 'Arbitrum', icon: '🔷' },
+];
+
+// Chain-specific tokens (all supported by 0x API)
+const TOKENS_BY_CHAIN: Record<number, string[]> = {
+  1: ['USDC', 'USDT', 'WETH', 'DAI'], // Ethereum
+  137: ['USDC', 'USDT', 'WETH'], // Polygon
+  42161: ['USDC', 'USDT', 'WETH'], // Arbitrum
+};
+
+const getTokensForChain = (chainId: number): string[] => {
+  return TOKENS_BY_CHAIN[chainId] || TOKENS_BY_CHAIN[1]; // Default to Ethereum
+};
 
 export default function NewStrategy() {
   const router = useRouter();
@@ -335,6 +352,40 @@ export default function NewStrategy() {
 
           <div>
             <label className="block text-sm font-semibold text-gray-900 dark:text-white mb-2">
+              Blockchain Network <span className="text-red-500">*</span>
+            </label>
+            <select
+              value={formData.chainId}
+              onChange={(e) => {
+                const newChainId = parseInt(e.target.value, 10);
+                const tokensForChain = getTokensForChain(newChainId);
+                // Reset base asset and universe if current tokens aren't available on new chain
+                const newBaseAsset = tokensForChain.includes(formData.baseAsset) 
+                  ? formData.baseAsset 
+                  : tokensForChain[0];
+                const newUniverse = formData.universe.filter(t => tokensForChain.includes(t));
+                setFormData({ 
+                  ...formData, 
+                  chainId: newChainId,
+                  baseAsset: newBaseAsset,
+                  universe: newUniverse,
+                });
+              }}
+              className="w-full px-4 py-3 border-2 border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all"
+            >
+              {SUPPORTED_CHAINS.map((chain) => (
+                <option key={chain.id} value={chain.id}>
+                  {chain.icon} {chain.name}
+                </option>
+              ))}
+            </select>
+            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+              Select the blockchain network for your strategy. All EVM networks use 0x API for reliable, real-time price data with free API credits.
+            </p>
+          </div>
+
+          <div>
+            <label className="block text-sm font-semibold text-gray-900 dark:text-white mb-2">
               Base Asset <span className="text-red-500">*</span>
             </label>
             <select
@@ -342,22 +393,26 @@ export default function NewStrategy() {
               onChange={(e) => setFormData({ ...formData, baseAsset: e.target.value })}
               className="w-full px-4 py-3 border-2 border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all"
             >
-              {SUPPORTED_TOKENS.map((token) => (
+              {getTokensForChain(formData.chainId).map((token) => (
                 <option key={token} value={token}>
                   {token}
                 </option>
               ))}
             </select>
-            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">The base currency for your trades (usually USDC or USDT)</p>
+            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+              The base currency for your trades (usually USDC or USDT). All prices powered by 0x API for reliable data.
+            </p>
           </div>
 
           <div>
             <label className="block text-sm font-semibold text-gray-900 dark:text-white mb-2">
               Trading Universe <span className="text-red-500">*</span>
             </label>
-            <p className="text-xs text-gray-600 dark:text-gray-400 mb-3">Select which tokens your strategy can trade</p>
+            <p className="text-xs text-gray-600 dark:text-gray-400 mb-3">
+              Select which tokens your strategy can trade. All tokens use 0x API for real-time price data.
+            </p>
             <div className="flex flex-wrap gap-3">
-              {SUPPORTED_TOKENS.map((token) => (
+              {getTokensForChain(formData.chainId).map((token) => (
                 <button
                   key={token}
                   type="button"
@@ -378,6 +433,11 @@ export default function NewStrategy() {
                 ⚠️ Select at least one token. If none selected, base asset will be used.
               </p>
             )}
+            <div className="mt-3 p-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg border border-blue-200 dark:border-blue-700">
+              <p className="text-xs text-blue-800 dark:text-blue-200">
+                💡 <strong>Powered by 0x API:</strong> All price data comes from 0x API, providing reliable, real-time quotes for EVM chains. Free tier available forever.
+              </p>
+            </div>
           </div>
 
           <div>

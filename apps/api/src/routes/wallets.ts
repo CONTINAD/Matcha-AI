@@ -126,5 +126,35 @@ export async function walletRoutes(fastify: FastifyInstance) {
       return reply.code(500).send({ error: error.message || 'Failed to disconnect wallet' });
     }
   });
+
+  // Encrypt private key for secure transmission
+  fastify.post('/wallets/encrypt-key', async (request, reply) => {
+    try {
+      const body = request.body as {
+        privateKey: string;
+        chainType: 'EVM' | 'SOLANA';
+      };
+
+      if (!body.privateKey) {
+        return reply.code(400).send({
+          error: 'Private key is required',
+        });
+      }
+
+      const encrypted = walletService.encryptPrivateKey(body.privateKey);
+
+      return reply.send({
+        encrypted: encrypted.encrypted,
+        iv: encrypted.iv,
+        tag: encrypted.tag,
+      });
+    } catch (error: any) {
+      logger.error({ error: error.message }, 'Error encrypting private key');
+      return reply.code(500).send({
+        error: 'Failed to encrypt private key',
+        message: error.message,
+      });
+    }
+  });
 }
 

@@ -49,10 +49,31 @@ export class DataFeed {
     baseAsset: string = 'USDC'
   ): Promise<MarketSnapshot | null> {
     try {
+      logger.debug({ symbol, timeframe, chainId, baseAsset }, 'DataFeed.getLatestMarketSnapshot called');
       const snapshot = await dataAggregator.getLatestSnapshot(symbol, timeframe, chainId, baseAsset);
+      
+      if (snapshot && snapshot.candle) {
+        logger.info({ 
+          symbol, 
+          chainId, 
+          baseAsset, 
+          price: snapshot.candle.close,
+          source: snapshot.source,
+          hasCandle: true
+        }, '✅ DataFeed: Successfully got market snapshot');
+      } else {
+        logger.warn({ symbol, chainId, baseAsset, snapshot: snapshot ? 'snapshot exists but no candle' : 'no snapshot' }, '⚠️ DataFeed: No candle in snapshot');
+      }
+      
       return snapshot;
-    } catch (error) {
-      logger.error({ error, symbol }, 'Live snapshot retrieval failed');
+    } catch (error: any) {
+      logger.error({ 
+        error: error.message, 
+        symbol, 
+        chainId,
+        baseAsset,
+        stack: error.stack 
+      }, '❌ DataFeed: Live snapshot retrieval failed');
       return null;
     }
   }
