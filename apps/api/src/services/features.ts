@@ -306,6 +306,84 @@ export function calculateTrendStrength(candles: Candle[], period = 20): number {
 }
 
 /**
+ * Detect market trend regime
+ * Returns: 'trending' | 'ranging' | 'choppy'
+ */
+export function detectTrendRegime(candles: Candle[], indicators: Indicators): 'trending' | 'ranging' | 'choppy' {
+  if (candles.length < 20) return 'ranging';
+
+  const adx = indicators.adx || 0;
+  const trendStrength = indicators.trendStrength || 0;
+  const emaFast = indicators.emaFast;
+  const emaSlow = indicators.emaSlow;
+  const sma20 = indicators.sma20;
+  const sma50 = indicators.sma50;
+
+  // Use ADX as primary indicator (ADX > 25 = strong trend)
+  if (adx > 25 && trendStrength > 0.6) {
+    // Check if EMAs or SMAs confirm trend direction
+    const hasTrend = (emaFast && emaSlow && Math.abs(emaFast - emaSlow) / emaSlow > 0.01) ||
+                    (sma20 && sma50 && Math.abs(sma20 - sma50) / sma50 > 0.01);
+    if (hasTrend) {
+      return 'trending';
+    }
+  }
+
+  // Choppy market: Low ADX, high volatility, no clear direction
+  const volatility = indicators.volatility || 0;
+  const price = candles[candles.length - 1]?.close || 0;
+  const volatilityPct = price > 0 ? (volatility / price) * 100 : 0;
+  
+  if (adx < 20 && volatilityPct > 2 && trendStrength < 0.5) {
+    return 'choppy';
+  }
+
+  // Default to ranging
+  return 'ranging';
+}
+
+/**
+ * Detect volatility regime
+ * Returns: 'low' | 'medium' | 'high'
+ */
+export function detectVolatilityRegime(candles: Candle[], indicators: Indicators): 'low' | 'medium' | 'high' {
+  if (candles.length < 14) return 'medium';
+
+  const atr = indicators.volatility || 0;
+  const price = candles[candles.length - 1]?.close || 0;
+  
+  if (price === 0) return 'medium';
+
+  // Calculate ATR as percentage of price
+  const atrPct = (atr / price) * 100;
+
+  // Thresholds based on typical crypto volatility
+  if (atrPct < 0.5) {
+    return 'low';
+  } else if (atrPct > 2.0) {
+    return 'high';
+  }
+
+  return 'medium';
+}
+
+/**
+ * Detect RSI regime
+ * Returns: 'oversold' | 'neutral' | 'overbought'
+ */
+export function detectRSIRegime(rsi?: number): 'oversold' | 'neutral' | 'overbought' {
+  if (!rsi) return 'neutral';
+
+  if (rsi < 30) {
+    return 'oversold';
+  } else if (rsi > 70) {
+    return 'overbought';
+  }
+
+  return 'neutral';
+}
+
+/**
  * Extract all indicators from recent candles (enhanced with parallel calculation)
  */
 export async function extractIndicators(candles: Candle[], config?: { rsi?: { period: number }; ema?: { fast: number; slow: number } }): Promise<Indicators> {

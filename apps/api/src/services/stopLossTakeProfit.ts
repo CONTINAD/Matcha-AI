@@ -1,5 +1,7 @@
-import type { Position, RiskLimits, Candle } from '@matcha-ai/shared';
+import type { Position, RiskLimits, Candle, Indicators } from '@matcha-ai/shared';
 import { logger } from '../config/logger';
+import { adaptiveExits } from './adaptiveExits';
+import { extractIndicatorsSync } from './features';
 
 export interface StopLossTakeProfitCheck {
   shouldClose: boolean;
@@ -9,31 +11,66 @@ export interface StopLossTakeProfitCheck {
 
 /**
  * Check if a position should be closed due to stop loss, take profit, or trailing stop
+ * Enhanced with adaptive exits based on market conditions
  */
 export function checkStopLossTakeProfit(
   position: Position,
   currentPrice: number,
   riskLimits: RiskLimits,
-  highestPrice?: number // For trailing stop - highest price since entry
+  highestPrice?: number, // For trailing stop - highest price since entry
+  candles?: Candle[], // For adaptive exits
+  indicators?: Indicators // For adaptive exits
 ): StopLossTakeProfitCheck {
   const entryPrice = position.entryPrice;
   const isLong = position.side === 'long';
+  
+  // Calculate adaptive exit targets if candles and indicators are provided
+  let adaptiveTakeProfit = riskLimits.takeProfitPct;
+  let adaptiveStopLoss = riskLimits.stopLossPct;
+  
+  if (candles && candles.length > 0 && indicators) {
+    try {
+      const adaptiveTargets = adaptiveExits.calculateExitTargets(
+        position,
+        candles,
+        indicators,
+        riskLimits
+      );
+      adaptiveTakeProfit = adaptiveTargets.takeProfitPct;
+      adaptiveStopLoss = adaptiveTargets.stopLossPct;
+      
+      logger.debug(
+        {
+          symbol: position.symbol,
+          baseTakeProfit: riskLimits.takeProfitPct,
+          adaptiveTakeProfit,
+          baseStopLoss: riskLimits.stopLossPct,
+          adaptiveStopLoss,
+        },
+        'Using adaptive exit targets'
+      );
+    } catch (error) {
+      logger.warn({ error }, 'Failed to calculate adaptive exits, using base limits');
+    }
+  }
   
   // Calculate current P&L percentage
   const priceChange = isLong 
     ? ((currentPrice - entryPrice) / entryPrice) * 100
     : ((entryPrice - currentPrice) / entryPrice) * 100;
   
-  // Check stop loss
-  if (riskLimits.stopLossPct && riskLimits.stopLossPct > 0) {
-    if (priceChange <= -riskLimits.stopLossPct) {
+  // Check stop loss (using adaptive if available)
+  const stopLossPct = adaptiveStopLoss || riskLimits.stopLossPct;
+  if (stopLossPct && stopLossPct > 0) {
+    if (priceChange <= -stopLossPct) {
       logger.info(
         { 
           symbol: position.symbol, 
           entryPrice, 
           currentPrice, 
           priceChange, 
-          stopLossPct: riskLimits.stopLossPct 
+          stopLossPct,
+          adaptive: adaptiveStopLoss !== riskLimits.stopLossPct
         },
         'Stop loss triggered'
       );
@@ -45,16 +82,18 @@ export function checkStopLossTakeProfit(
     }
   }
   
-  // Check take profit
-  if (riskLimits.takeProfitPct && riskLimits.takeProfitPct > 0) {
-    if (priceChange >= riskLimits.takeProfitPct) {
+  // Check take profit (using adaptive if available)
+  const takeProfitPct = adaptiveTakeProfit || riskLimits.takeProfitPct;
+  if (takeProfitPct && takeProfitPct > 0) {
+    if (priceChange >= takeProfitPct) {
       logger.info(
         { 
           symbol: position.symbol, 
           entryPrice, 
           currentPrice, 
           priceChange, 
-          takeProfitPct: riskLimits.takeProfitPct 
+          takeProfitPct,
+          adaptive: adaptiveTakeProfit !== riskLimits.takeProfitPct
         },
         'Take profit triggered'
       );

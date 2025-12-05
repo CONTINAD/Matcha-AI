@@ -25,6 +25,7 @@ export interface MeanReversionSignal {
 export class StrategyEngine {
   /**
    * Detect arbitrage opportunities across 0x liquidity
+   * Enhanced with cross-DEX comparison and triangular arbitrage
    * Scans for >2% edges between tokens
    */
   async detectArb(
@@ -37,7 +38,7 @@ export class StrategyEngine {
       const sellAmount = '1000000000000000000'; // 1 token (18 decimals)
       const opportunities: ArbOpportunity[] = [];
 
-      // Get quotes for all pairs
+      // 1. Direct arbitrage (baseToken -> targetToken)
       for (const targetToken of targetTokens) {
         try {
           const quote = await zeroExService.getQuote({
@@ -73,10 +74,94 @@ export class StrategyEngine {
         }
       }
 
+      // 2. Triangular arbitrage (A -> B -> C -> A)
+      if (targetTokens.length >= 2) {
+        for (let i = 0; i < targetTokens.length; i++) {
+          for (let j = i + 1; j < targetTokens.length; j++) {
+            try {
+              const tokenA = baseToken;
+              const tokenB = targetTokens[i];
+              const tokenC = targetTokens[j];
+
+              // A -> B
+              const quoteAB = await zeroExService.getQuote({
+                chainId,
+                sellToken: tokenA,
+                buyToken: tokenB,
+                amount: sellAmount,
+                slippageBps: 50,
+              });
+
+              if (!quoteAB || !quoteAB.buyAmount) continue;
+
+              // B -> C
+              const quoteBC = await zeroExService.getQuote({
+                chainId,
+                sellToken: tokenB,
+                buyToken: tokenC,
+                amount: quoteAB.buyAmount,
+                slippageBps: 50,
+              });
+
+              if (!quoteBC || !quoteBC.buyAmount) continue;
+
+              // C -> A (round trip)
+              const quoteCA = await zeroExService.getQuote({
+                chainId,
+                sellToken: tokenC,
+                buyToken: tokenA,
+                amount: quoteBC.buyAmount,
+                slippageBps: 50,
+              });
+
+              if (!quoteCA || !quoteCA.buyAmount) continue;
+
+              // Calculate round-trip edge
+              const finalAmount = parseFloat(quoteCA.buyAmount);
+              const originalAmount = parseFloat(sellAmount);
+              const roundTripEdge = ((finalAmount - originalAmount) / originalAmount) * 100;
+
+              // Estimate gas costs (rough estimate: 0.001 ETH per transaction = 3 transactions)
+              // For Polygon: ~$0.01 total, for Ethereum: ~$50-100 total
+              const gasCostEstimate = chainId === 137 ? 0.01 : 50; // USD
+              const tradeValue = originalAmount * parseFloat(quoteAB.price || '0');
+              const gasCostPct = tradeValue > 0 ? (gasCostEstimate / tradeValue) * 100 : 0;
+              const netEdge = roundTripEdge - gasCostPct;
+
+              // Only consider if net edge (after gas) is profitable
+              if (netEdge >= minEdge && roundTripEdge > gasCostPct * 2) {
+                opportunities.push({
+                  chainId,
+                  sellToken: tokenA,
+                  buyToken: tokenB, // First leg of triangular arb
+                  edge: netEdge,
+                  sellAmount,
+                  expectedBuyAmount: quoteCA.buyAmount,
+                  guaranteedPrice: quoteCA.guaranteedPrice || quoteCA.price || '0',
+                });
+
+                logger.info(
+                  {
+                    chainId,
+                    path: `${tokenA} -> ${tokenB} -> ${tokenC} -> ${tokenA}`,
+                    roundTripEdge,
+                    gasCostPct,
+                    netEdge,
+                  },
+                  'Triangular arbitrage opportunity detected'
+                );
+              }
+            } catch (error) {
+              logger.warn({ error, chainId, tokens: [baseToken, targetTokens[i], targetTokens[j]] }, 'Failed triangular arb check');
+            }
+          }
+        }
+      }
+
       // Return best opportunity
       if (opportunities.length > 0) {
         const best = opportunities.reduce((a, b) => (a.edge > b.edge ? a : b));
-        logger.info({ best }, 'Arbitrage opportunity detected');
+        logger.info({ best }, 'Best arbitrage opportunity detected');
         return best;
       }
 

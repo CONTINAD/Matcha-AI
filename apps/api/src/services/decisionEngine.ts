@@ -8,11 +8,13 @@ import type {
   Trade,
   RiskLimits,
 } from '@matcha-ai/shared';
-import { extractIndicatorsSync } from './features';
+import { extractIndicatorsSync, detectTrendRegime, detectVolatilityRegime, detectRSIRegime } from './features';
 import { calculateMaxDrawdown, calculateSharpe } from '@matcha-ai/shared';
 import { logger } from '../config/logger';
 import { matchaBrain } from './matchaBrain';
 import { riskManager } from './riskManager';
+import { strategySelector } from './strategySelector';
+import { aiValidator } from './aiValidator';
 
 export interface DecisionOptions {
   aiMode?: 'OFF' | 'ASSIST' | 'FULL';
@@ -94,6 +96,11 @@ export class DecisionEngine {
     const adx = indicators?.adx;
     const price = context.recentCandles[context.recentCandles.length - 1]?.close || 0;
     const candles = context.recentCandles;
+
+    // Detect market regimes (CRITICAL: Must be called before using regime variables)
+    const trendRegime = detectTrendRegime(candles, indicators);
+    const volRegime = detectVolatilityRegime(candles, indicators);
+    const rsiRegime = detectRSIRegime(rsi);
 
     let action: 'long' | 'short' | 'flat' = 'flat';
     let confidence = 0.3;
@@ -289,13 +296,36 @@ export class DecisionEngine {
    * - Rejects AI ideas that violate risk limits
    * - Blends position sizes intelligently
    * - Prefers fast decision if confidence is similar
+   * - Validates AI decision using AIValidator
    */
   combineFastAndAI(
     fastDecision: Decision,
     aiDecision: Decision,
-    strategyConfig: StrategyConfig
+    strategyConfig: StrategyConfig,
+    context?: MarketContext
   ): Decision {
-    // Reject AI decision if it violates risk limits
+    // Validate AI decision using AIValidator
+    if (context) {
+      const validation = aiValidator.validateDecision(aiDecision, context, strategyConfig.riskLimits);
+      if (!validation.valid) {
+        logger.warn(
+          {
+            reason: validation.reason,
+            aiDecision: aiDecision.action,
+            confidence: aiDecision.confidence,
+          },
+          'AI decision rejected by validator'
+        );
+        return fastDecision;
+      }
+      
+      // Use adjusted decision if validator modified it
+      if (validation.adjustedDecision) {
+        aiDecision = validation.adjustedDecision;
+      }
+    }
+    
+    // Reject AI decision if it violates risk limits (fallback check)
     if (aiDecision.targetPositionSizePct > (strategyConfig.riskLimits.maxPositionPct || 10)) {
       logger.warn(
         {
@@ -354,6 +384,7 @@ export class DecisionEngine {
    * 
    * This is the single method that all modes (backtest, paper, live) should use.
    * It handles:
+   * - Dynamic strategy selection based on market regime
    * - Fast rule-based decisions
    * - Optional AI assistance (when enabled and conditions met)
    * - Risk limit enforcement
@@ -368,6 +399,44 @@ export class DecisionEngine {
     
     // Update context with computed indicators
     context.indicators = indicators;
+
+    // Try dynamic strategy selection if enabled
+    let strategyDecision: Decision | null = null;
+    if (options.strategyId && strategyConfig.enableDynamicStrategySelection !== false) {
+      try {
+        const selectedStrategy = await strategySelector.selectStrategy(
+          options.strategyId,
+          context.recentCandles,
+          indicators,
+          strategyConfig
+        );
+        
+        if (selectedStrategy) {
+          strategyDecision = await strategySelector.generateDecision(
+            selectedStrategy,
+            context.recentCandles,
+            indicators,
+            strategyConfig
+          );
+          
+          if (strategyDecision && strategyDecision.confidence > 0.6) {
+            logger.info(
+              { 
+                strategyId: options.strategyId,
+                selectedStrategy,
+                confidence: strategyDecision.confidence,
+                action: strategyDecision.action 
+              },
+              'Using dynamic strategy selection'
+            );
+            // Use strategy decision if confidence is high enough
+            // Otherwise fall through to fast decision
+          }
+        }
+      } catch (error) {
+        logger.warn({ error }, 'Strategy selector failed, using fast decision');
+      }
+    }
 
     // Get fast decision first (always)
     const fastDecision = this.getFastDecision(context, indicators);
@@ -403,15 +472,21 @@ export class DecisionEngine {
           }
         );
 
-        // Combine fast and AI decisions
-        return this.combineFastAndAI(fastDecision, aiDecision, strategyConfig);
+        // Combine fast and AI decisions (use strategy decision if available, otherwise fast)
+        const baseDecision = strategyDecision && strategyDecision.confidence > fastDecision.confidence 
+          ? strategyDecision 
+          : fastDecision;
+        return this.combineFastAndAI(baseDecision, aiDecision, strategyConfig, context);
       } catch (error: any) {
         logger.warn({ error: error.message }, 'AI decision failed, using fast decision');
         return fastDecision;
       }
     }
 
-    // Return fast decision (AI not needed or not enabled)
+    // Return best decision (strategy > fast > flat)
+    if (strategyDecision && strategyDecision.confidence > fastDecision.confidence) {
+      return strategyDecision;
+    }
     return fastDecision;
   }
 }

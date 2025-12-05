@@ -2,6 +2,8 @@ import type { Candle, MarketContext, Decision, StrategyConfig, Position, ZeroXSw
 import { riskManager } from './riskManager';
 import { dataFeed } from './dataFeed';
 import { zeroExService } from './zeroExService';
+import { executionEngine } from './executionEngine';
+import { slippageManager } from './slippageManager';
 import { transactionTracker } from './transactionTracker';
 import { tradeAnalyticsService } from './tradeAnalyticsService';
 import { predictionTrainer } from './predictionTrainer';
@@ -10,6 +12,7 @@ import { PrismaClient } from '@prisma/client';
 import { logger } from '../config/logger';
 import { config } from '../config/env';
 import { decisionEngine } from './decisionEngine';
+import { extractIndicatorsSync } from './features';
 
 const prisma = new PrismaClient();
 
@@ -229,17 +232,26 @@ export class LiveTrader {
 
               // For closing: sell the position token for base asset
               const sellAmount = (currentPosition.size * currentPosition.entryPrice).toString();
-              const slippageBps = 50; // 0.5%
+              
+              // Calculate dynamic slippage based on market conditions
+              const slippageBps = slippageManager.calculateSlippage({
+                candles: recentCandles,
+                indicators,
+                tradeSize: parseFloat(sellAmount) * candle.close,
+                timeOfDay: new Date().getHours(),
+              });
 
               try {
-                // Check allowance before building swap
-                const quote = await zeroExService.getQuote({
+                // Use execution engine with fallback routing
+                const executionResult = await executionEngine.executeTrade({
                   chainId: strategy.chainId,
                   sellToken: quoteToken,
                   buyToken: baseToken,
                   amount: sellAmount,
                   slippageBps,
                 });
+                
+                const quote = executionResult.quote;
 
                 // Validate allowance target
                 const allowanceTarget = zeroExService.getAllowanceTarget(quote, strategy.chainId);
@@ -250,6 +262,7 @@ export class LiveTrader {
                   logger.info({ allowanceTarget, strategyId, symbol }, 'Allowance target validated');
                 }
 
+                // Build swap transaction using the quote from execution engine
                 const swapTx = await zeroExService.buildSwapTx({
                   chainId: strategy.chainId,
                   sellToken: quoteToken,
@@ -257,6 +270,17 @@ export class LiveTrader {
                   amount: sellAmount,
                   slippageBps,
                 });
+                
+                logger.info(
+                  { 
+                    strategyId, 
+                    symbol, 
+                    source: executionResult.source,
+                    fallbackUsed: executionResult.fallbackUsed,
+                    latency: executionResult.latency 
+                  },
+                  'Trade executed via execution engine'
+                );
 
                 // Store pending trade for user to sign
                 const pendingTrade: PendingTrade = {
@@ -282,13 +306,15 @@ export class LiveTrader {
                 targetSizePct,
                 equity,
                 candle.close,
-                kellyCapPct
+                kellyCapPct,
+                decision.confidence
               );
               const clampedSize = riskManager.clampPositionSize(
                 targetSizePct,
                 equity,
                 candle.close,
-                strategyConfig.riskLimits
+                strategyConfig.riskLimits,
+                indicators
               );
 
               if (
@@ -315,17 +341,26 @@ export class LiveTrader {
 
                 // For opening: buy the position token with base asset
                 const buyAmount = (clampedSize * candle.close).toString();
-                const slippageBps = 50;
+                
+                // Calculate dynamic slippage based on market conditions
+                const slippageBps = slippageManager.calculateSlippage({
+                  candles: recentCandles,
+                  indicators,
+                  tradeSize: parseFloat(buyAmount) * candle.close,
+                  timeOfDay: new Date().getHours(),
+                });
 
                 try {
-                  // Check allowance before building swap
-                  const quote = await zeroExService.getQuote({
+                  // Use execution engine with fallback routing
+                  const executionResult = await executionEngine.executeTrade({
                     chainId: strategy.chainId,
                     sellToken: baseToken,
                     buyToken: quoteToken,
                     amount: buyAmount,
                     slippageBps,
                   });
+                  
+                  const quote = executionResult.quote;
 
                   // Validate allowance target
                   const allowanceTarget = zeroExService.getAllowanceTarget(quote, strategy.chainId);
@@ -336,6 +371,7 @@ export class LiveTrader {
                     logger.info({ allowanceTarget, strategyId, symbol }, 'Allowance target validated');
                   }
 
+                  // Build swap transaction using the quote from execution engine
                   const swapTx = await zeroExService.buildSwapTx({
                     chainId: strategy.chainId,
                     sellToken: baseToken,
@@ -343,6 +379,17 @@ export class LiveTrader {
                     amount: buyAmount,
                     slippageBps,
                   });
+                  
+                  logger.info(
+                    { 
+                      strategyId, 
+                      symbol, 
+                      source: executionResult.source,
+                      fallbackUsed: executionResult.fallbackUsed,
+                      latency: executionResult.latency 
+                    },
+                    'Trade executed via execution engine'
+                  );
 
                   const pendingTrade: PendingTrade = {
                     strategyId,

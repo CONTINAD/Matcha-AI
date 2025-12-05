@@ -10,6 +10,7 @@ import { wsService } from './websocket';
 import { checkStopLossTakeProfit, TrailingStopTracker } from './stopLossTakeProfit';
 import { solanaLogger } from './solanaLogger';
 import { decisionEngine } from './decisionEngine';
+import { extractIndicatorsSync } from './features';
 
 const prisma = new PrismaClient();
 type TrackedPosition = Position & { tradeId?: string; entryFee?: number };
@@ -733,7 +734,7 @@ export class PaperTrader {
           const currentPrice = latestCandle.close;
           const desiredSize =
             targetSizePct > 0
-              ? riskManager.calculatePositionSize(targetSizePct, equity, currentPrice, kellyCapPct)
+              ? riskManager.calculatePositionSize(targetSizePct, equity, currentPrice, kellyCapPct, decision.confidence)
               : 0;
 
           // No longer forcing trades - respect AI decisions
@@ -1048,7 +1049,8 @@ export class PaperTrader {
                 targetSizePct,
                 equity,
                 currentPrice,
-                config.riskLimits
+                config.riskLimits,
+                indicators
               );
 
               // In paper mode, be more lenient with risk checks for new strategies
@@ -1214,7 +1216,8 @@ export class PaperTrader {
                 targetSizePct || 8, // Use 8% if targetSizePct is 0
                 equity,
                 currentPrice,
-                config.riskLimits
+                config.riskLimits,
+                indicators
               );
               
               // Ensure minimum size

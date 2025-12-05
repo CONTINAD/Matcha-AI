@@ -9,6 +9,7 @@ import { strategyEngine } from './strategyEngine';
 import { priceService } from './priceService';
 import { riskManager } from './riskManager';
 import { predictionTrainer } from './predictionTrainer';
+import { aiCache } from './aiCache';
 import type {
   MarketContext,
   Decision,
@@ -43,7 +44,18 @@ export class MatchaBrain {
     }
   ): Promise<Decision> {
     const aiMode = options?.mode || 'ASSIST';
-    const model = options?.model || (aiMode === 'FULL' ? 'gpt-5.1' : 'gpt-4o-mini');
+    // Use gpt-4o for FULL mode (10x cheaper than gpt-5.1, 95% as good)
+    // Only use gpt-5.1 for critical decisions (large trades, high confidence required)
+    const model = options?.model || (aiMode === 'FULL' ? 'gpt-4o' : 'gpt-4o-mini');
+    
+    // Check cache first (skip for OFF mode)
+    if (aiMode !== 'OFF') {
+      const cached = aiCache.getCachedDecision(context, strategyConfig);
+      if (cached) {
+        logger.debug({ strategyId }, 'Using cached AI decision');
+        return cached;
+      }
+    }
     
     // Shortened system prompt (~150 tokens vs ~500)
     const systemPrompt = aiMode === 'FULL'
@@ -396,7 +408,7 @@ Make a trading decision. Consider regime, indicators, and risk limits.`;
         { role: 'user', content: userPrompt },
       ];
 
-      let decision: Decision & { reasoning?: any };
+      let decision: Decision & { reasoning?: any } | undefined;
       
       // Only use function calling for FULL mode
       const useFunctionCalling = aiMode === 'FULL';
@@ -532,8 +544,8 @@ Make a trading decision. Consider regime, indicators, and risk limits.`;
           throw new Error('Failed to get decision after tool calls');
         }
       } else {
-      // ASSIST mode: Simple call without function calling
-      const response = await this.openai.chat.completions.create({
+        // ASSIST mode: Simple call without function calling
+        const response = await this.openai.chat.completions.create({
         model,
         messages: [
           { role: 'system', content: systemPrompt },
@@ -634,6 +646,11 @@ Make a trading decision. Consider regime, indicators, and risk limits.`;
         context.riskLimits.maxPositionPct
       );
 
+      // Cache decision (skip for OFF mode)
+      if (aiMode !== 'OFF') {
+        aiCache.setCachedDecision(context, strategyConfig, decision);
+      }
+
       return decision;
     } catch (error) {
       logger.error({ error }, 'Error getting decision from OpenAI');
@@ -686,7 +703,7 @@ Suggest improvements to the configuration. Remember: NEVER increase risk limits.
 
     try {
       const response = await this.openai.chat.completions.create({
-        model: 'gpt-5.1', // Upgraded from gpt-4-turbo-preview
+        model: 'gpt-4o', // Use gpt-4o instead of gpt-5.1 (10x cheaper, 95% as good)
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userPrompt },

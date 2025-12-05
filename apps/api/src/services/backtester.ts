@@ -193,7 +193,8 @@ export class Backtester {
           targetSizePct,
           equity,
           currentCandle.close,
-          kellyCapPct
+          kellyCapPct,
+          decision.confidence
         );
 
         // Determine if we need to trade
@@ -419,7 +420,8 @@ export class Backtester {
               targetSizePct,
               equity,
               currentCandle.close,
-              strategyConfig.riskLimits
+              strategyConfig.riskLimits,
+              context.indicators as any
             );
 
             if (

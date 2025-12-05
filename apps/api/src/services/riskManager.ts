@@ -1,4 +1,4 @@
-import type { RiskLimits, Trade, Position } from '@matcha-ai/shared';
+import type { RiskLimits, Trade, Position, Indicators } from '@matcha-ai/shared';
 import { logger } from '../config/logger';
 import { riskEngine } from './riskEngine';
 import { riskRejectionsCounter } from './metrics';
@@ -112,9 +112,52 @@ export class RiskManager {
 
   /**
    * Clamp position size to risk limits
+   * Now includes volatility-based adjustment
    */
-  clampPositionSize(targetPct: number, equity: number, price: number, riskLimits: RiskLimits): number {
-    const maxPct = Math.min(targetPct, riskLimits.maxPositionPct);
+  clampPositionSize(
+    targetPct: number,
+    equity: number,
+    price: number,
+    riskLimits: RiskLimits,
+    indicators?: Indicators
+  ): number {
+    // Apply volatility-based adjustment to max position
+    let adjustedMaxPct = riskLimits.maxPositionPct;
+    
+    if (indicators?.volatility && price > 0) {
+      const atr = indicators.volatility;
+      const atrPct = (atr / price) * 100;
+      
+      // High volatility (ATR > 2%): Reduce position by 50%
+      if (atrPct > 2.0) {
+        adjustedMaxPct = riskLimits.maxPositionPct * 0.5;
+        logger.debug(
+          {
+            atrPct,
+            originalMaxPct: riskLimits.maxPositionPct,
+            adjustedMaxPct,
+          },
+          'Reduced max position due to high volatility'
+        );
+      }
+      // Low volatility (ATR < 0.5%): Can increase position by 20% (up to original max)
+      else if (atrPct < 0.5) {
+        adjustedMaxPct = Math.min(
+          riskLimits.maxPositionPct * 1.2,
+          riskLimits.maxPositionPct
+        );
+        logger.debug(
+          {
+            atrPct,
+            originalMaxPct: riskLimits.maxPositionPct,
+            adjustedMaxPct,
+          },
+          'Increased max position due to low volatility'
+        );
+      }
+    }
+
+    const maxPct = Math.min(targetPct, adjustedMaxPct);
     const maxValue = (equity * maxPct) / 100;
     const maxSize = maxValue / price;
     return maxSize;
@@ -125,8 +168,30 @@ export class RiskManager {
    * Optimized for small accounts (minimum trade size considerations)
    * For $5 accounts: ensures minimum $0.50 trades to cover fees
    */
-  calculatePositionSize(positionPct: number, equity: number, price: number, kellyCapPct?: number): number {
-    const pctToUse = kellyCapPct !== undefined ? Math.min(positionPct, kellyCapPct) : positionPct;
+  calculatePositionSize(
+    positionPct: number,
+    equity: number,
+    price: number,
+    kellyCapPct?: number,
+    confidence?: number
+  ): number {
+    // Apply confidence weighting: Higher confidence = larger position
+    let confidenceAdjustedPct = positionPct;
+    if (confidence !== undefined && confidence > 0) {
+      // Scale position size by confidence: 0.5 confidence = 50% size, 0.9 confidence = 90% size
+      // But don't go below 30% of original size even with low confidence
+      confidenceAdjustedPct = positionPct * Math.max(0.3, confidence);
+      logger.debug(
+        {
+          originalPct: positionPct,
+          confidence,
+          confidenceAdjustedPct,
+        },
+        'Applied confidence weighting to position size'
+      );
+    }
+
+    const pctToUse = kellyCapPct !== undefined ? Math.min(confidenceAdjustedPct, kellyCapPct) : confidenceAdjustedPct;
     
     // For very small accounts (< $100), optimize for fee efficiency
     let adjustedPct = pctToUse;
